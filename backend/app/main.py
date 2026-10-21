@@ -7,7 +7,7 @@ import secrets
 import smtplib
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 import pymysql
@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pymysql.cursors import DictCursor
+from pydantic import EmailStr
 
 from .ai_preparation import (
     AIProviderError,
@@ -45,21 +46,23 @@ from .database import (
 )
 from .dev_seed import seed_demo_data
 from .file_storage import delete_institute_document, delete_uploaded_file
-from .mailer import send_password_reset_otp
+from .mailer import send_institute_approval_email, send_password_reset_otp
 from .rate_limit import SlidingWindowLimiter, client_address
 from .schemas import (
-    ActivityCreate,
     AIPreparationGenerateRequest,
     DepartmentCreate,
     DepartmentUpdate,
     InstituteApprovalUpdate,
-    InstituteRegisterRequest,
     LoginRequest,
+    Password,
     PasswordResetConfirm,
     PasswordResetRequest,
     PaperCreate,
     PaperUpdate,
+    Phone,
+    RegistrationText,
     RegisterRequest,
+    ResourceReviewUpdate,
     UserCreate,
     UserUpdate,
 )
@@ -109,10 +112,17 @@ def _configured_int(setting: str, default: int, minimum: int = 1) -> int:
 
 UPLOAD_DIR = _configured_directory("UPLOAD_DIR", "uploads")
 INSTITUTE_DOCUMENT_DIR = (UPLOAD_DIR.parent / "institute_documents").resolve()
+RESOURCE_UPLOAD_DIR = _configured_directory("RESOURCE_UPLOAD_DIR", "resource_uploads")
 ADMIN_DASHBOARD_DIR = BACKEND_DIR / "admin"
 MAX_UPLOAD_MB = _configured_int("MAX_UPLOAD_MB", 20)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 INSTITUTE_DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
+if (
+    RESOURCE_UPLOAD_DIR.resolve() == UPLOAD_DIR.resolve()
+    or UPLOAD_DIR.resolve() in RESOURCE_UPLOAD_DIR.resolve().parents
+):
+    raise RuntimeError("RESOURCE_UPLOAD_DIR must be outside the public UPLOAD_DIR")
+RESOURCE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Throttles. Keyed per client address for anonymous endpoints and per user id
 # for the authenticated AI endpoint, so students sharing one campus NAT are not
@@ -232,6 +242,55 @@ def paper_json(paper: dict) -> dict:
     }
 
 
+def resource_json(resource: dict) -> dict:
+    return {
+        "id": resource["id"],
+        "title": resource["title"],
+        "resource_type": resource["resource_type"],
+        "department_id": resource.get("department_id"),
+        "department_name": resource.get("department_name"),
+        "subject": resource.get("subject"),
+        "semester": resource.get("semester"),
+        "academic_year": resource.get("academic_year"),
+        "description": resource.get("description"),
+        "file_url": f"/api/resources/{resource['id']}/file",
+        "original_file_name": resource["original_file_name"],
+        "uploaded_by": resource.get("uploaded_by"),
+        "uploaded_by_name": resource.get("uploaded_by_name"),
+        "status": resource["status"],
+        "reviewed_by": resource.get("reviewed_by"),
+        "reviewed_at": resource.get("reviewed_at"),
+        "created_at": resource.get("created_at"),
+        "updated_at": resource.get("updated_at"),
+    }
+
+
+def resolve_resource_file(file_path: object) -> Path | None:
+    if not isinstance(file_path, str) or not file_path.strip():
+        return None
+    if Path(file_path).name != file_path:
+        return None
+    root = RESOURCE_UPLOAD_DIR.resolve()
+    candidate = (root / file_path).resolve()
+    if candidate.parent != root or not candidate.is_file():
+        return None
+    return candidate
+
+
+def delete_resource_file(file_path: object) -> bool:
+    candidate = resolve_resource_file(file_path)
+    if candidate is None:
+        return False
+    try:
+        candidate.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning("Could not delete private resource file", exc_info=True)
+        return False
+
+
 PAPER_SELECT = """
     SELECT p.*, d.name AS department_name
     FROM papers AS p
@@ -282,19 +341,35 @@ def require_roles(user: dict, roles: set[str]) -> None:
 def can_manage_department(user: dict, department_id: str, action: str = "write") -> None:
     """Authorise a paper write/delete against a department.
 
-    Department administrators are scoped to their own department. Institute
-    accounts are approved institution staff and may publish and correct papers
-    across departments, but deleting is reserved for administrators so that one
-    college cannot remove another college's material.
+    System administrators may manage all departments. Approved institute
+    accounts may publish and correct papers across departments, but deleting
+    is reserved for administrators so one college cannot remove another
+    college's material.
     """
-    require_roles(user, {"dept_admin", "super_admin", "institute"})
-    if user["role"] == "dept_admin" and user.get("department_id") != department_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot manage another department")
+    require_roles(user, {"super_admin", "institute"})
     if user["role"] == "institute" and action == "delete":
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Institute accounts cannot delete question papers",
         )
+
+
+def downgrade_legacy_department_admins(db) -> int:
+    downgraded = execute(
+        db,
+        """
+        UPDATE profiles
+        SET role = 'user', department_id = NULL, token_version = token_version + 1
+        WHERE role = 'dept_admin'
+        """,
+    )
+    if downgraded:
+        db.commit()
+        logger.warning(
+            "Converted %s legacy department administrator account(s) to reader accounts",
+            downgraded,
+        )
+    return downgraded
 
 
 def commit_or_conflict(db) -> None:
@@ -315,6 +390,31 @@ def bump_token_version(db, user_id: str) -> None:
         db,
         "UPDATE profiles SET token_version = token_version + 1 WHERE id = %s",
         (user_id,),
+    )
+
+
+def _actor_label(user: dict) -> str:
+    """A human-readable actor name for activity messages.
+
+    Callers and tests may pass a partial profile, so fall back rather than
+    raising and losing the audit row.
+    """
+    return user.get("name") or user.get("email") or "Staff member"
+
+
+def record_activity(db, activity_type: str, message: str, user_id: str | None = None) -> None:
+    """Insert an activity-log row from trusted server-side code only.
+
+    This is deliberately not exposed over HTTP: the public create endpoint was
+    removed so students cannot forge entries in the admin activity feed.
+    """
+    execute(
+        db,
+        """
+        INSERT INTO activity_logs (id, type, message, user_id, created_at)
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+        """,
+        (str(uuid4()), activity_type, message, user_id),
     )
 
 
@@ -356,6 +456,7 @@ def initialize_database() -> None:
         ) from error
     try:
         verify_schema(connection)
+        downgrade_legacy_department_admins(connection)
         if seed_demo_enabled:
             inserted = seed_demo_data(connection)
             connection.commit()
@@ -452,16 +553,25 @@ def register(payload: RegisterRequest, db=Depends(get_db)):
     }
 
 
-@app.post("/api/auth/register/institute", status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/auth/register/institute",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(register_limit)],
+)
 async def register_institute(
-    payload: Annotated[InstituteRegisterRequest, Form()],
+    name: Annotated[RegistrationText, Form(max_length=160)],
+    email: Annotated[EmailStr, Form()],
+    password: Annotated[Password, Form()],
+    phone: Annotated[Phone, Form()],
+    designation: Annotated[RegistrationText, Form(max_length=120)],
+    institute_name: Annotated[RegistrationText, Form(max_length=200)],
     file: UploadFile = File(...),
     db=Depends(get_db),
 ):
-    name = payload.name.strip()
-    phone = payload.phone.strip()
-    designation = payload.designation.strip()
-    institute_name = payload.institute_name.strip()
+    name = name.strip()
+    phone = phone.strip()
+    designation = designation.strip()
+    institute_name = institute_name.strip()
     if not all((name, phone, designation, institute_name)):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "All institute staff details are required")
 
@@ -486,7 +596,7 @@ async def register_institute(
     if not valid_content:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Supporting document does not match its file type")
 
-    email = payload.email.lower()
+    email = email.lower()
     if query_one(db, "SELECT id FROM profiles WHERE LOWER(email) = %s", (email,)):
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists")
 
@@ -508,7 +618,7 @@ async def register_institute(
                 profile_id,
                 email,
                 name,
-                hash_password(payload.password),
+                hash_password(password),
                 institute_name,
                 phone,
                 designation,
@@ -797,10 +907,8 @@ def delete_department(
 ):
     """Delete a department and everything that cascades from it.
 
-    The foreign keys cascade to papers and favourites, and department
-    administrators are removed explicitly. Because that is a lot of data to lose
-    behind a single click, the caller must confirm the exact impact first and
-    pass force=true.
+    The foreign keys cascade to papers and favourites. Because that can remove
+    user data, the caller must confirm the exact impact first and pass force=true.
     """
     require_roles(user, {"super_admin"})
     if not query_one(db, "SELECT id FROM departments WHERE id = %s", (department_id,)):
@@ -813,12 +921,10 @@ def delete_department(
             (SELECT COUNT(*) FROM papers WHERE department_id = %s) AS papers,
             (SELECT COUNT(*) FROM favorites AS f
                 JOIN papers AS p ON p.id = f.paper_id
-                WHERE p.department_id = %s) AS favorites,
-            (SELECT COUNT(*) FROM profiles
-                WHERE department_id = %s AND role = 'dept_admin') AS department_admins
+                WHERE p.department_id = %s) AS favorites
         """,
-        (department_id, department_id, department_id),
-    ) or {"papers": 0, "favorites": 0, "department_admins": 0}
+        (department_id, department_id),
+    ) or {"papers": 0, "favorites": 0}
 
     file_rows = query_all(db, "SELECT file_url FROM papers WHERE department_id = %s", (department_id,))
 
@@ -827,13 +933,12 @@ def delete_department(
             status.HTTP_409_CONFLICT,
             (
                 f"This department still has {impact['papers']} question paper(s), which would also "
-                f"delete {impact['favorites']} favourite(s) and {impact['department_admins']} department "
-                "administrator account(s). Re-send with force=true to proceed."
+                f"delete {impact['favorites']} favourite(s). Re-send with force=true to proceed."
             ),
         )
 
-    execute(db, "DELETE FROM profiles WHERE department_id = %s AND role = 'dept_admin'", (department_id,))
     execute(db, "DELETE FROM departments WHERE id = %s", (department_id,))
+    record_activity(db, "department_deleted", f"{_actor_label(user)} deleted department {department_id}", user.get("id"))
     db.commit()
 
     for row in file_rows:
@@ -844,7 +949,6 @@ def delete_department(
         "deleted": {
             "papers": impact["papers"],
             "favorites": impact["favorites"],
-            "department_admins": impact["department_admins"],
         },
     }
 
@@ -886,6 +990,212 @@ def list_papers(
     }.get(sortBy, "p.created_at DESC")
     rows = query_all(db, PAPER_SELECT + where_clause + f" ORDER BY {sort_clause}", tuple(params))
     return [paper_json(paper) for paper in rows]
+
+
+@app.get("/api/resources")
+def list_resources(
+    department: str | None = None,
+    resource_type: Literal["notes", "assignments", "other"] | None = None,
+    search: str | None = None,
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    conditions = []
+    params = []
+    if user["role"] != "super_admin":
+        conditions.append("(r.status = 'approved' OR r.uploaded_by = %s)")
+        params.append(user["id"])
+    if department:
+        conditions.append("r.department_id = %s")
+        params.append(department)
+    if resource_type:
+        conditions.append("r.resource_type = %s")
+        params.append(resource_type)
+    if search:
+        pattern = f"%{search.strip()}%"
+        conditions.append("(r.title LIKE %s OR r.subject LIKE %s OR r.description LIKE %s)")
+        params.extend((pattern, pattern, pattern))
+    where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = query_all(
+        db,
+        """
+        SELECT r.*, d.name AS department_name
+        FROM resources AS r
+        LEFT JOIN departments AS d ON d.id = r.department_id
+        """ + where_clause + " ORDER BY r.created_at DESC",
+        tuple(params),
+    )
+    return [resource_json(resource) for resource in rows]
+
+
+@app.post("/api/resources", status_code=status.HTTP_201_CREATED)
+async def create_resource(
+    file: UploadFile = File(...),
+    title: str = Form(min_length=2, max_length=200),
+    resource_type: Literal["notes", "assignments", "other"] = Form(...),
+    department_id: str = Form(min_length=1, max_length=36),
+    subject: str | None = Form(default=None, max_length=200),
+    semester: int | None = Form(default=None, ge=1, le=12),
+    academic_year: str | None = Form(default=None, max_length=8),
+    description: str | None = Form(default=None, max_length=2000),
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    require_roles(user, {"user", "super_admin"})
+    title = title.strip()
+    if len(title) < 2:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Title must contain at least 2 characters")
+    if academic_year and not re.fullmatch(r"\d{4}(?:-\d{2})?", academic_year.strip()):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Academic year must be YYYY or YYYY-YY")
+    if not query_one(db, "SELECT id FROM departments WHERE id = %s", (department_id,)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Department not found")
+    if file.content_type != "application/pdf" or Path(file.filename or "").suffix.lower() != ".pdf":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only PDF files are allowed")
+    contents = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
+    if len(contents) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"Maximum upload size is {MAX_UPLOAD_MB} MB")
+    if not contents.startswith(b"%PDF"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "File content is not a valid PDF")
+
+    resource_id = str(uuid4())
+    file_name = f"{resource_id}.pdf"
+    stored_path = RESOURCE_UPLOAD_DIR / file_name
+    stored_path.write_bytes(contents)
+    review_status = "approved" if user["role"] == "super_admin" else "pending"
+    try:
+        execute(
+            db,
+            """
+            INSERT INTO resources (
+                id, title, resource_type, department_id, subject, semester, academic_year,
+                description, file_path, original_file_name, uploaded_by, uploaded_by_name,
+                status, reviewed_by, reviewed_at, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, IF(%s = 'approved', CURRENT_TIMESTAMP, NULL), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """,
+            (
+                resource_id,
+                title,
+                resource_type,
+                department_id,
+                subject.strip() if subject and subject.strip() else None,
+                semester,
+                academic_year.strip() if academic_year else None,
+                description.strip() if description and description.strip() else None,
+                file_name,
+                Path(file.filename or "resource.pdf").name,
+                user["id"],
+                user["name"],
+                review_status,
+                user["id"] if review_status == "approved" else None,
+                review_status,
+            ),
+        )
+        record_activity(
+            db,
+            "resource_submitted" if review_status == "pending" else "resource_published",
+            f"{_actor_label(user)} submitted {resource_type} resource '{title}'",
+            user.get("id"),
+        )
+        commit_or_conflict(db)
+    except Exception:
+        db.rollback()
+        delete_resource_file(file_name)
+        raise
+    resource = query_one(
+        db,
+        """
+        SELECT r.*, d.name AS department_name
+        FROM resources AS r LEFT JOIN departments AS d ON d.id = r.department_id
+        WHERE r.id = %s
+        """,
+        (resource_id,),
+    )
+    return resource_json(resource)
+
+
+@app.get("/api/resources/{resource_id}/file")
+def get_resource_file(
+    resource_id: str,
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    resource = query_one(db, "SELECT * FROM resources WHERE id = %s", (resource_id,))
+    if not resource:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
+    can_view = (
+        resource["status"] == "approved"
+        or user["role"] == "super_admin"
+        or resource.get("uploaded_by") == user["id"]
+    )
+    if not can_view:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
+    path = resolve_resource_file(resource.get("file_path"))
+    if path is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource file not found")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=Path(resource["original_file_name"]).name,
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@app.put("/api/resources/{resource_id}/review")
+def review_resource(
+    resource_id: str,
+    payload: ResourceReviewUpdate,
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    require_roles(user, {"super_admin"})
+    resource = query_one(db, "SELECT title, resource_type FROM resources WHERE id = %s", (resource_id,))
+    if not resource:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
+    execute(
+        db,
+        """
+        UPDATE resources
+        SET status = %s, reviewed_by = %s, reviewed_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (payload.status, user["id"], resource_id),
+    )
+    record_activity(
+        db,
+        f"resource_{payload.status}",
+        f"{_actor_label(user)} {payload.status} {resource['resource_type']} resource '{resource['title']}'",
+        user.get("id"),
+    )
+    commit_or_conflict(db)
+    return {"id": resource_id, "status": payload.status}
+
+
+@app.delete("/api/resources/{resource_id}")
+def delete_resource(
+    resource_id: str,
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    resource = query_one(db, "SELECT * FROM resources WHERE id = %s", (resource_id,))
+    if not resource:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
+    if user["role"] != "super_admin" and (
+        resource.get("uploaded_by") != user["id"] or resource["status"] == "approved"
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only remove your own unapproved submissions")
+    execute(db, "DELETE FROM resources WHERE id = %s", (resource_id,))
+    record_activity(
+        db,
+        "resource_deleted",
+        f"{_actor_label(user)} deleted resource '{resource['title']}'",
+        user.get("id"),
+    )
+    commit_or_conflict(db)
+    delete_resource_file(resource.get("file_path"))
+    return {"message": "Resource deleted"}
 
 
 @app.get("/api/ai-prep/options")
@@ -1147,6 +1457,7 @@ def delete_paper(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Paper not found")
     can_manage_department(user, paper["department_id"], action="delete")
     execute(db, "DELETE FROM papers WHERE id = %s", (paper_id,))
+    record_activity(db, "paper_deleted", f"{_actor_label(user)} deleted question paper {paper_id}", user.get("id"))
     db.commit()
     # Only after the row is committed: deleting first would destroy the PDF even
     # if the database rejected the delete.
@@ -1193,13 +1504,10 @@ def list_users(
     db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
-    require_roles(user, {"super_admin", "dept_admin"})
+    require_roles(user, {"super_admin"})
     conditions = []
     params = []
-    if user["role"] == "dept_admin":
-        conditions.append("department_id = %s")
-        params.append(user.get("department_id"))
-    elif department:
+    if department:
         conditions.append("department_id = %s")
         params.append(department)
     if role:
@@ -1254,10 +1562,8 @@ def create_user(
     user: dict = Depends(require_user),
 ):
     require_roles(user, {"super_admin"})
-    if payload.role not in {"dept_admin", "super_admin"}:
+    if payload.role != "super_admin":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid user role")
-    if payload.role == "dept_admin" and not payload.department_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Department is required for department admins")
     if payload.department_id and not query_one(
         db, "SELECT id FROM departments WHERE id = %s", (payload.department_id,)
     ):
@@ -1297,6 +1603,7 @@ def update_institute_approval(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target["role"] != "institute":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only institute accounts require approval")
+    approval_changed = target["approval_status"] != payload.approval_status
     execute(
         db,
         "UPDATE profiles SET approval_status = %s WHERE id = %s",
@@ -1316,7 +1623,19 @@ def update_institute_approval(
         ),
     )
     db.commit()
-    return user_json(query_one(db, "SELECT * FROM profiles WHERE id = %s", (user_id,)))
+    result = user_json(query_one(db, "SELECT * FROM profiles WHERE id = %s", (user_id,)))
+    if payload.approval_status == "approved" and approval_changed:
+        try:
+            send_institute_approval_email(
+                target["email"],
+                target["name"],
+                target.get("institute_name") or "your institute",
+            )
+            result["approval_email_sent"] = True
+        except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
+            logger.exception("Unable to send institute approval email")
+            result["approval_email_sent"] = False
+    return result
 
 
 @app.put("/api/users/{user_id}")
@@ -1340,7 +1659,7 @@ def update_user(
         changes["email"] = changes["email"].strip().lower()
     if "role" in changes:
         require_roles(user, {"super_admin"})
-        if changes["role"] not in {"dept_admin", "super_admin"}:
+        if changes["role"] != "super_admin":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid user role")
     if "department_id" in changes and changes["department_id"] and not query_one(
         db, "SELECT id FROM departments WHERE id = %s", (changes["department_id"],)
@@ -1383,6 +1702,7 @@ def delete_user(
     if target["role"] == "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot delete a super admin")
     execute(db, "DELETE FROM profiles WHERE id = %s", (user_id,))
+    record_activity(db, "user_deleted", f"{_actor_label(user)} deleted user account {user_id}", user.get("id"))
     db.commit()
     # The private affiliation document must not outlive the account.
     delete_institute_document(target.get("institute_document_path"), INSTITUTE_DOCUMENT_DIR)
@@ -1396,13 +1716,8 @@ def list_activity(
     db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
-    if user["role"] == "dept_admin":
-        rows = query_all(
-            db,
-            "SELECT * FROM activity_logs WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
-            (user["id"], limit),
-        )
-    elif user_id:
+    require_roles(user, {"super_admin"})
+    if user_id:
         rows = query_all(
             db,
             "SELECT * FROM activity_logs WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
@@ -1413,95 +1728,53 @@ def list_activity(
     return rows
 
 
-@app.post("/api/activity", status_code=status.HTTP_201_CREATED)
-def create_activity(
-    payload: ActivityCreate,
-    db=Depends(get_db),
-    user: dict = Depends(require_user),
-):
-    activity_id = str(uuid4())
-    execute(
-        db,
-        """
-        INSERT INTO activity_logs (id, type, message, user_id, created_at)
-        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-        """,
-        (activity_id, payload.type, payload.message, user["id"]),
-    )
-    db.commit()
-    return query_one(db, "SELECT * FROM activity_logs WHERE id = %s", (activity_id,))
-
-
 @app.get("/api/stats")
 def get_stats(db=Depends(get_db), user: dict = Depends(require_user)):
-    require_roles(user, {"super_admin", "dept_admin"})
-    paper_filter = ""
-    params = ()
-    if user["role"] == "dept_admin":
-        paper_filter = " WHERE department_id = %s"
-        params = (user.get("department_id"),)
+    require_roles(user, {"super_admin"})
     totals = query_one(
         db,
-        f"""
+        """
         SELECT COUNT(*) AS total_papers,
                COALESCE(SUM(downloads), 0) AS total_downloads,
                COALESCE(SUM(views), 0) AS total_views
-        FROM papers{paper_filter}
+        FROM papers
         """,
-        params,
     )
-    if user["role"] == "dept_admin":
-        departments = query_all(
-            db,
-            "SELECT id, name, code FROM departments WHERE id = %s ORDER BY name",
-            (user.get("department_id"),),
-        )
-    else:
-        departments = query_all(db, "SELECT id, name, code FROM departments ORDER BY name")
+    departments = query_all(db, "SELECT id, name, code FROM departments ORDER BY name")
     total_departments = len(departments)
-    if user["role"] == "dept_admin":
-        admin_count = query_one(
-            db,
-            "SELECT COUNT(*) AS count FROM profiles WHERE role = 'dept_admin' AND department_id = %s",
-            (user.get("department_id"),),
-        )["count"]
-    else:
-        admin_count = query_one(db, "SELECT COUNT(*) AS count FROM profiles WHERE role = 'dept_admin'")["count"]
+    admin_count = query_one(
+        db, "SELECT COUNT(*) AS count FROM profiles WHERE role = 'super_admin'"
+    )["count"]
     papers_by_dept = query_all(
         db,
-        f"""
+        """
         SELECT d.name AS department, d.code, COUNT(p.id) AS count
         FROM departments AS d LEFT JOIN papers AS p ON p.department_id = d.id
-        {'WHERE d.id = %s' if user['role'] == 'dept_admin' else ''}
         GROUP BY d.id, d.name, d.code ORDER BY d.name
         """,
-        params,
     )
     exam_types = ["Weekly Test 1", "Weekly Test 2", "CIA 1", "CIA 2", "End Semester"]
     exam_rows = query_all(
         db,
         f"""
         SELECT exam_type AS type, COUNT(*) AS count FROM papers
-        {"WHERE department_id = %s AND " if user["role"] == "dept_admin" else "WHERE "}exam_type IN ({", ".join(["%s"] * len(exam_types))})
+        WHERE exam_type IN ({", ".join(["%s"] * len(exam_types))})
         GROUP BY exam_type
         """,
-        (*params, *exam_types),
+        tuple(exam_types),
     )
     exam_counts = {row["type"]: row["count"] for row in exam_rows}
     semester_rows = query_all(
         db,
-        f"""
+        """
         SELECT semester, COUNT(*) AS count FROM papers
-        {paper_filter}
         GROUP BY semester
         """,
-        params,
     )
     semester_counts = {row["semester"]: row["count"] for row in semester_rows}
     recent_rows = query_all(
         db,
-        PAPER_SELECT + paper_filter.replace("department_id", "p.department_id") + " ORDER BY p.created_at DESC LIMIT 10",
-        params,
+        PAPER_SELECT + " ORDER BY p.created_at DESC LIMIT 10",
     )
     return {
         "totalPapers": totals["total_papers"],
@@ -1522,9 +1795,10 @@ def get_stats(db=Depends(get_db), user: dict = Depends(require_user)):
 @app.post("/api/uploads", status_code=status.HTTP_201_CREATED)
 async def upload_pdf(
     file: UploadFile = File(...),
+    db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
-    require_roles(user, {"dept_admin", "super_admin", "institute"})
+    require_roles(user, {"super_admin", "institute"})
     if file.content_type != "application/pdf" or Path(file.filename or "").suffix.lower() != ".pdf":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only PDF files are allowed")
     contents = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
@@ -1535,6 +1809,8 @@ async def upload_pdf(
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(file.filename or "paper.pdf").name)
     file_name = f"{uuid4()}_{safe_name}"
     (UPLOAD_DIR / file_name).write_bytes(contents)
+    record_activity(db, "upload", f"{_actor_label(user)} uploaded '{file.filename}'", user.get("id"))
+    db.commit()
     # A relative URL is stored. Building it from request.base_url baked the
     # uploader's host name into the database, so every existing paper broke when
     # the server's LAN IP changed and a spoofed Host header could poison it.

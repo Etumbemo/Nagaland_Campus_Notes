@@ -1,8 +1,19 @@
 import * as SecureStore from 'expo-secure-store';
 import { File, UploadType } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const TOKEN_KEY = 'campus_notes_access_token';
+
+function formatValidationErrors(detail) {
+  if (!Array.isArray(detail)) return detail;
+  return detail.map((item) => {
+    const location = Array.isArray(item.loc)
+      ? item.loc.filter((part) => part !== 'body').join('.')
+      : '';
+    return location ? `${location}: ${item.msg}` : item.msg;
+  }).join(', ');
+}
 
 function normalizeKeys(value) {
   if (Array.isArray(value)) return value.map(normalizeKeys);
@@ -13,7 +24,7 @@ function normalizeKeys(value) {
         let normalizedValue = normalizeKeys(item);
         if (key === 'file_url' && typeof item === 'string' && API_URL) {
           const fileUrl = new URL(item, API_URL);
-          if (fileUrl.pathname.startsWith('/uploads/')) {
+          if (fileUrl.pathname.startsWith('/uploads/') || fileUrl.pathname.startsWith('/api/resources/')) {
             normalizedValue = `${API_URL}${fileUrl.pathname}${fileUrl.search}${fileUrl.hash}`;
           }
         }
@@ -131,9 +142,9 @@ export async function register(
     }
     if (response.status < 200 || response.status >= 300) {
       const detail = result?.detail;
-      const message = Array.isArray(detail)
-        ? detail.map((item) => item.msg).join(', ')
-        : detail || result?.error || `Institute registration failed (HTTP ${response.status})`;
+      const message = formatValidationErrors(detail)
+        || result?.error
+        || `Institute registration failed (HTTP ${response.status})`;
       throw new Error(message);
     }
     if (!result) throw new Error('The server returned an invalid response after registration.');
@@ -206,4 +217,60 @@ export async function uploadPdf(file) {
   }
   if (!data) throw new Error('The server returned an invalid response after uploading the PDF.');
   return normalizeKeys(data);
+}
+
+export async function uploadStudyResource(file, metadata) {
+  if (!API_URL) {
+    throw new Error('Set EXPO_PUBLIC_API_URL in mobile/.env and restart Expo.');
+  }
+
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  const parameters = {
+    title: metadata.title,
+    resource_type: metadata.resourceType,
+    department_id: metadata.departmentId,
+  };
+  for (const [key, value] of Object.entries({
+    subject: metadata.subject,
+    semester: metadata.semester,
+    academic_year: metadata.academicYear,
+    description: metadata.description,
+  })) {
+    if (value) parameters[key] = String(value);
+  }
+  const response = await new File(file.uri).upload(`${API_URL}/api/resources`, {
+    httpMethod: 'POST',
+    uploadType: UploadType.MULTIPART,
+    fieldName: 'file',
+    mimeType: file.mimeType || 'application/pdf',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    parameters,
+  });
+
+  let data;
+  try {
+    data = JSON.parse(response.body);
+  } catch {
+    data = null;
+  }
+  if (response.status < 200 || response.status >= 300) {
+    const detail = data?.detail;
+    const message = Array.isArray(detail)
+      ? detail.map((item) => item.msg).join(', ')
+      : detail || data?.error || `Resource upload failed (HTTP ${response.status})`;
+    throw new Error(message);
+  }
+  if (!data) throw new Error('The server returned an invalid response after resource upload.');
+  return normalizeKeys(data);
+}
+
+export async function downloadStudyResource(resource, destination) {
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  const result = await FileSystem.downloadAsync(resource.fileUrl, destination, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`The server returned status ${result.status}.`);
+  }
+  return result;
 }

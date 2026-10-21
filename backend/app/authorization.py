@@ -3,7 +3,6 @@ from typing import Any
 
 
 ROLE_UPDATE_FIELDS = {
-    "dept_admin": frozenset({"name", "email", "password"}),
     "user": frozenset({"name", "email", "password"}),
     "institute": frozenset({"name", "email", "institute_name", "password"}),
 }

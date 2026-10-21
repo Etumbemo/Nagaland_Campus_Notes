@@ -4,10 +4,17 @@ Each test names the audit finding it protects:
 FILE-01 file lifecycle, API-01 stored URLs, VAL-01 year validation,
 AI-03 citation grounding, AI-04 extraction cache, SEC-02 rate limiting,
 DB-01 department delete impact, AUTHZ-01 institute delete scope.
+
+Follow-up findings:
+SEC-03 activity feed is admin-only, ACT-01 activity writes are server-side
+only, SEC-06 institute registration is throttled.
 """
+
+import asyncio
 
 import pytest
 from fastapi import HTTPException
+from fastapi.routing import APIRoute
 from pydantic import ValidationError
 
 try:
@@ -258,7 +265,7 @@ def test_delete_department_requires_force_when_papers_exist(monkeypatch):
     monkeypatch.setattr(
         main,
         "query_one",
-        lambda _db, sql, _params=(): {"papers": 2, "favorites": 1, "department_admins": 1},
+        lambda _db, sql, _params=(): {"papers": 2, "favorites": 1},
     )
     monkeypatch.setattr(main, "query_all", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(main, "execute", lambda *_args, **_kwargs: 1)
@@ -282,7 +289,7 @@ def test_delete_department_with_force_reports_what_was_removed(monkeypatch):
     monkeypatch.setattr(
         main,
         "query_one",
-        lambda _db, sql, _params=(): {"papers": 2, "favorites": 1, "department_admins": 1},
+        lambda _db, sql, _params=(): {"papers": 2, "favorites": 1},
     )
     monkeypatch.setattr(main, "query_all", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(main, "execute", lambda *_args, **_kwargs: 1)
@@ -295,7 +302,7 @@ def test_delete_department_with_force_reports_what_was_removed(monkeypatch):
         user={"role": "super_admin"},
     )
 
-    assert result["deleted"] == {"papers": 2, "favorites": 1, "department_admins": 1}
+    assert result["deleted"] == {"papers": 2, "favorites": 1}
     assert database.commits == 1
 
 
@@ -310,6 +317,20 @@ def test_institute_account_may_write_papers():
         "dept-any",
         action="write",
     )
+
+
+def test_reader_and_legacy_department_admin_cannot_manage_papers():
+    for role in ("user", "dept_admin"):
+        with pytest.raises(HTTPException) as error:
+            main.can_manage_department({"role": role}, "dept-any")
+        assert error.value.status_code == 403
+
+
+def test_reader_cannot_upload_papers():
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main.upload_pdf(file=None, db=object(), user={"role": "user"}))
+
+    assert error.value.status_code == 403
 
 
 def test_institute_account_may_not_delete_papers():
@@ -354,3 +375,159 @@ def test_ai_provider_status_reports_configuration_without_secrets(monkeypatch):
     assert "super-secret-key-value" not in serialized
     assert "hosted.example" not in serialized
     assert "key" not in serialized.lower()
+
+
+# --------------------------------------------------------------------------
+# SEC-03: the activity feed is admin-only
+# --------------------------------------------------------------------------
+
+
+def _activity_rows(_db, _sql, _params=()):
+    return [{"id": "log-1", "type": "login", "message": "Someone logged in"}]
+
+
+def test_activity_feed_rejects_plain_users(monkeypatch):
+    monkeypatch.setattr(main, "query_all", _activity_rows)
+
+    with pytest.raises(HTTPException) as error:
+        main.list_activity(db=object(), user={"id": "user-1", "role": "user"})
+
+    assert error.value.status_code == 403
+
+
+def test_activity_feed_rejects_institute_accounts(monkeypatch):
+    monkeypatch.setattr(main, "query_all", _activity_rows)
+
+    with pytest.raises(HTTPException) as error:
+        main.list_activity(
+            db=object(),
+            user={"id": "inst-1", "role": "institute", "approval_status": "approved"},
+        )
+
+    assert error.value.status_code == 403
+
+
+def test_activity_feed_rejects_legacy_department_admin():
+    with pytest.raises(HTTPException) as error:
+        main.list_activity(db=object(), user={"id": "admin-1", "role": "dept_admin"})
+    assert error.value.status_code == 403
+
+
+def test_activity_feed_allows_super_admin_full_view(monkeypatch):
+    captured = {}
+
+    def capture(_db, sql, params=()):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"id": "log-1"}]
+
+    monkeypatch.setattr(main, "query_all", capture)
+
+    rows = main.list_activity(limit=10, db=object(), user={"id": "root", "role": "super_admin"})
+
+    assert rows == [{"id": "log-1"}]
+    assert captured["params"] == (10,)
+
+
+# --------------------------------------------------------------------------
+# ACT-01: activity entries can only be written by trusted server-side code
+# --------------------------------------------------------------------------
+
+
+def test_activity_log_has_no_public_create_endpoint():
+    activity_posts = [
+        route
+        for route in main.app.routes
+        if isinstance(route, APIRoute) and route.path == "/api/activity" and "POST" in route.methods
+    ]
+
+    assert activity_posts == [], "clients must not be able to forge activity entries"
+
+
+def test_record_activity_inserts_a_server_side_row(monkeypatch):
+    captured = {}
+
+    def fake_execute(_db, sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return 1
+
+    monkeypatch.setattr(main, "execute", fake_execute)
+
+    main.record_activity(object(), "paper_deleted", "Admin deleted a paper", "admin-1")
+
+    assert "INSERT INTO activity_logs" in captured["sql"]
+    _row_id, row_type, message, user_id = captured["params"]
+    assert row_type == "paper_deleted"
+    assert message == "Admin deleted a paper"
+    assert user_id == "admin-1"
+
+
+def _patch_delete_dependencies(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *_a, **_k: {"papers": 0, "favorites": 0})
+    monkeypatch.setattr(main, "query_all", lambda *_a, **_k: [])
+    monkeypatch.setattr(main, "execute", lambda *_a, **_k: 1)
+
+
+class _RecordingDB:
+    def commit(self):
+        pass
+
+
+def test_department_delete_is_logged(monkeypatch):
+    logged = []
+    _patch_delete_dependencies(monkeypatch)
+    monkeypatch.setattr(main, "record_activity", lambda *_a, **_k: logged.append(True))
+
+    main.delete_department("dept-1", force=False, db=_RecordingDB(), user={"role": "super_admin", "name": "Root"})
+
+    assert logged == [True]
+
+
+def test_user_delete_is_logged(monkeypatch):
+    logged = []
+    monkeypatch.setattr(main, "query_one", lambda *_a, **_k: {"role": "user", "institute_document_path": None})
+    monkeypatch.setattr(main, "execute", lambda *_a, **_k: 1)
+    monkeypatch.setattr(main, "record_activity", lambda *_a, **_k: logged.append(True))
+
+    main.delete_user("user-9", db=_RecordingDB(), user={"role": "super_admin", "name": "Root"})
+
+    assert logged == [True]
+
+
+# --------------------------------------------------------------------------
+# SEC-06: institute registration is throttled like the other auth routes
+# --------------------------------------------------------------------------
+
+
+def _route_dependencies(path: str):
+    route = next(
+        route for route in main.app.routes if isinstance(route, APIRoute) and route.path == path
+    )
+    return [dep.dependency for dep in route.dependencies]
+
+
+def test_institute_registration_carries_the_register_rate_limit():
+    assert main.register_limit in _route_dependencies("/api/auth/register/institute")
+
+
+def test_institute_registration_accepts_individual_multipart_fields():
+    route = next(
+        route
+        for route in main.app.routes
+        if isinstance(route, APIRoute) and route.path == "/api/auth/register/institute"
+    )
+
+    assert {field.name for field in route.dependant.body_params} == {
+        "name",
+        "email",
+        "password",
+        "phone",
+        "designation",
+        "institute_name",
+        "file",
+    }
+
+
+def test_user_registration_still_carries_the_register_rate_limit():
+    assert main.register_limit in _route_dependencies("/api/auth/register")

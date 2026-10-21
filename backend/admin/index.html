@@ -5,51 +5,138 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Campus-notes Admin</title>
   <style>
-    :root { color-scheme: light; --ink: #17243b; --muted: #68758a; --blue: #325fce; --border: #dfe5ef; --paper: #fff; --wash: #f5f7fb; --red: #b83434; --green: #25805d; }
+    :root {
+      color-scheme: dark;
+      --deep-navy: #102A43;
+      --forest-green: #245C46;
+      --teal: #167D78;
+      --mint-green: #61D6B3;
+      --off-white: #F5F4EF;
+      --white: #FFFFFF;
+      --soft-grey: #9FB3C8;
+      --cool-grey: #D9E2EC;
+      --dark-muted: #627D98;
+      --card-surface: rgba(20, 46, 73, 0.9);
+      --glass-background: rgba(23, 50, 77, 0.72);
+      --glass-input: rgba(255, 255, 255, 0.08);
+      --glass-border: rgba(255, 255, 255, 0.14);
+      --glass-border-active: rgba(97, 214, 179, 0.45);
+      --red: #E15B64;
+      --ink: var(--white);
+      --muted: var(--soft-grey);
+      --blue: var(--mint-green);
+      --blue-dark: var(--teal);
+      --border: var(--glass-border);
+      --paper: var(--card-surface);
+      --wash: var(--deep-navy);
+      --green: var(--mint-green);
+      --navy: var(--deep-navy);
+      --soft-blue: rgba(22, 125, 120, 0.28);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--wash); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+    body { margin: 0; background: var(--wash); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     button, input, select, textarea { font: inherit; }
-    button { border: 0; border-radius: 8px; padding: 10px 14px; background: var(--blue); color: white; font-weight: 700; cursor: pointer; }
-    button.secondary { color: var(--blue); background: #edf1fb; border: 1px solid var(--border); }
-    button.danger { color: var(--red); background: #fff2f2; border: 1px solid #f0d0d0; }
-    button:disabled { opacity: .55; cursor: default; }
-    input, select, textarea { width: 100%; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px; background: white; color: var(--ink); }
+    button { min-height: 42px; border: 0; border-radius: 12px; padding: 10px 15px; background: var(--forest-green); color: var(--white); font-weight: 700; cursor: pointer; transition: background .15s ease, border-color .15s ease, opacity .15s ease; }
+    button:hover { background: var(--teal); }
+    button.secondary { color: var(--off-white); background: var(--glass-input); border: 1px solid rgba(255, 255, 255, 0.2); }
+    button.secondary:hover { background: var(--soft-blue); border-color: var(--glass-border-active); }
+    button.danger { color: var(--red); background: rgba(225, 91, 100, 0.12); border: 1px solid rgba(225, 91, 100, 0.35); }
+    button.danger:hover { background: rgba(225, 91, 100, 0.22); }
+    button:disabled { opacity: .5; cursor: default; }
+    button:disabled:hover { background: inherit; }
+    input, select, textarea { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--glass-input); color: var(--ink); }
+    input::placeholder, textarea::placeholder { color: var(--soft-grey); opacity: 1; }
+    select option { background: var(--deep-navy); color: var(--white); }
+    input[type="file"]::file-selector-button { margin-right: 10px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--glass-input); color: var(--off-white); cursor: pointer; }
+    a { color: var(--mint-green); font-weight: 600; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:hover { color: var(--off-white); }
+    ::selection { color: var(--deep-navy); background: var(--mint-green); }
     textarea { min-height: 78px; resize: vertical; }
-    label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; font-weight: 600; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px max(20px, calc((100% - 1120px) / 2)); background: white; border-bottom: 1px solid var(--border); }
-    header h1 { margin: 0; color: var(--blue); font-size: 22px; }
+    label { display: grid; gap: 5px; color: var(--off-white); font-size: 13px; font-weight: 600; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid var(--mint-green); outline-offset: 2px; }
+    input:focus, select:focus, textarea:focus { border-color: var(--glass-border-active); }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px; background: rgba(16, 42, 67, 0.96); border-bottom: 1px solid var(--border); }
+    header h1 { margin: 0; color: var(--white); font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
     header p { margin: 2px 0 0; color: var(--muted); }
-    main { width: min(1120px, calc(100% - 32px)); margin: 26px auto; }
-    .panel, .card { padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); }
-    .login { width: min(420px, 100%); margin: 8vh auto; }
+    main { width: min(1600px, calc(100% - 56px)); margin: 28px auto; }
+    .panel, .card { padding: 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--paper); box-shadow: 0 8px 24px rgb(0 0 0 / 18%); }
+    .login { width: min(420px, calc(100% - 32px)); margin: 8vh auto; background: var(--glass-background); }
     .login form, .form-grid { display: grid; gap: 13px; }
     .login form[hidden] { display: none; }
-    .login h2, h2, h3 { margin: 0 0 12px; }
+    .login h2, h2, h3 { margin: 0 0 12px; color: var(--white); }
     .muted { color: var(--muted); }
-    .error { display: none; padding: 10px 12px; border-radius: 8px; color: #812020; background: #fff0f0; }
+    .error { display: none; padding: 10px 12px; border: 1px solid rgba(225, 91, 100, 0.35); border-radius: 12px; color: #FFADB2; background: rgba(225, 91, 100, 0.12); }
     .success { color: var(--green); }
-    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
-    nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
-    nav button { color: var(--muted); background: white; border: 1px solid var(--border); }
-    nav button.active { color: white; background: var(--blue); border-color: var(--blue); }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
-    .metric strong { display: block; font-size: 25px; }
-    .metric span { color: var(--muted); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; align-items: start; }
+    .notice.success { padding: 10px 12px; border: 1px solid var(--glass-border-active); border-radius: 12px; background: rgba(22, 125, 120, 0.25); }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 22px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 18px; background: var(--glass-background); }
+    .admin-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .admin-avatar { display: grid; flex: 0 0 44px; width: 44px; height: 44px; place-items: center; border: 1px solid var(--glass-border-active); border-radius: 14px; color: var(--mint-green); background: rgba(22, 125, 120, 0.25); font-size: 16px; font-weight: 800; }
+    .admin-copy { min-width: 0; }
+    .admin-eyebrow { display: block; color: var(--mint-green); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    #welcome { display: block; overflow-wrap: anywhere; font-size: 17px; font-weight: 800; }
+    #role-label { font-size: 13px; }
+    .role-chip { display: inline-block; margin-top: 3px; padding: 2px 8px; border: 1px solid var(--glass-border); border-radius: 20px; color: var(--soft-grey); font-size: 12px; font-weight: 600; }
+    #reload[aria-busy="true"] { min-width: 145px; color: var(--mint-green); }
+    .workspace { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 24px; align-items: start; }
+    .sidebar { position: sticky; top: 20px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 18px; background: var(--card-surface); }
+    .sidebar-label { margin: 8px 10px 10px; color: var(--dark-muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    nav { display: grid; gap: 4px; }
+    nav button { min-height: 44px; padding: 10px 12px; border: 0; border-radius: 12px; color: var(--muted); background: transparent; text-align: left; font-weight: 600; }
+    nav button:hover { color: var(--white); background: var(--glass-input); }
+    nav button.active { color: var(--mint-green); background: rgba(22, 125, 120, 0.25); font-weight: 800; }
+    .content { min-width: 0; }
+    .page-heading { margin: 0 0 18px; }
+    .page-heading h2 { margin: 0 0 4px; font-size: 24px; letter-spacing: -.03em; }
+    .page-heading p { margin: 0; color: var(--muted); }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .metric { display: flex; min-width: 0; min-height: 112px; flex-direction: column; justify-content: space-between; gap: 10px; padding: 16px 18px; overflow: hidden; border-left: 2px solid var(--teal); }
+    .metric strong { display: block; margin: 0; color: var(--white); font-size: clamp(25px, 2vw, 30px); line-height: 1.15; letter-spacing: -.03em; }
+    .metric span { color: var(--muted); font-size: 14px; font-weight: 600; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 18px; align-items: start; }
+    .paper-workspace { grid-template-columns: minmax(290px, .82fr) minmax(0, 1.38fr); gap: 18px; }
+    .paper-upload, .paper-library { min-width: 0; }
+    .paper-upload { align-content: start; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .paper-upload h2 { margin-bottom: 0; }
+    .paper-library { padding: 20px; }
+    .paper-library .panel-heading { align-items: flex-start; }
+    .paper-library .panel-heading h3 { line-height: 1.4; }
+    .overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .panel-heading h3 { margin: 0; font-size: 16px; }
+    .panel-heading button { padding: 6px 9px; font-size: 12px; }
+    .filter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 12px; margin-bottom: 18px; }
+    .filter-grid .search-filter { grid-column: 1 / -1; }
+    .pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+    .pagination-controls { display: flex; gap: 8px; }
+    .pagination button { padding: 7px 11px; }
+    .empty-state { padding: 22px 12px; color: var(--muted); text-align: center; }
+    .badge { display: inline-block; padding: 5px 10px; border: 1px solid var(--glass-border); border-radius: 20px; background: var(--glass-input); color: var(--cool-grey); font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .badge.pending, .badge.approved, .badge.active { border-color: var(--glass-border-active); color: var(--mint-green); background: rgba(22, 125, 120, 0.25); }
+    .badge.rejected { border-color: rgba(225, 91, 100, 0.35); color: var(--red); background: rgba(225, 91, 100, 0.12); }
     .form-grid .wide { grid-column: 1 / -1; }
     .section { display: none; }
     .section.active { display: block; }
-    .table-wrap { overflow-x: auto; }
+    .table-wrap { max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; min-width: 620px; }
     th, td { padding: 10px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    tbody tr:hover { background: var(--glass-input); }
     td.actions { white-space: nowrap; }
-    td.actions button { margin: 0 4px 4px 0; padding: 7px 10px; }
+    td.actions button { min-height: 36px; margin: 0 4px 4px 0; padding: 7px 10px; }
     .notice { margin: 0 0 15px; }
     .file-name { overflow-wrap: anywhere; }
-    dialog { width: min(620px, calc(100% - 28px)); max-height: 90vh; border: 1px solid var(--border); border-radius: 12px; padding: 20px; color: var(--ink); }
-    dialog::backdrop { background: rgb(17 28 48 / 55%); }
-    @media (max-width: 560px) { header { align-items: flex-start; padding: 14px 16px; } .toolbar { align-items: flex-start; flex-direction: column; } main { margin-top: 16px; } .panel, .card { padding: 14px; } }
+    dialog { width: min(620px, calc(100% - 28px)); max-height: 90vh; border: 1px solid var(--border); border-radius: 18px; padding: 20px; color: var(--ink); background: var(--card-surface); }
+    dialog::backdrop { background: rgb(16 42 67 / 78%); }
+    .detail-list { display: grid; grid-template-columns: minmax(120px, .7fr) 1fr; gap: 10px 16px; margin: 16px 0; }
+    .detail-list dt { color: var(--muted); }
+    .detail-list dd { margin: 0; overflow-wrap: anywhere; font-weight: 600; }
+    @media (max-width: 1180px) { .paper-workspace { gap: 14px; } .paper-upload, .paper-library { padding: 16px; } }
+    @media (max-width: 1120px) { .paper-workspace { grid-template-columns: 1fr; } }
+    @media (max-width: 980px) { main { width: calc(100% - 40px); } .workspace { grid-template-columns: 1fr; gap: 16px; } .sidebar { position: static; padding: 8px; } nav { display: flex; overflow-x: auto; } nav button { flex: 0 0 auto; } .sidebar-label { display: none; } .metrics { grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); } .paper-workspace { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 16px; } }
+    @media (max-width: 800px) { .paper-workspace { grid-template-columns: 1fr; } .paper-upload, .paper-library { padding: 18px; } }
+    @media (max-width: 680px) { header { align-items: flex-start; padding: 14px 16px; } header h1 { font-size: 18px; } .toolbar { align-items: stretch; } .toolbar > button { align-self: flex-start; } main { width: calc(100% - 28px); margin: 18px auto; } .panel, .card { padding: 16px; } .paper-upload, .paper-library { padding: 16px; } .overview-grid { grid-template-columns: 1fr; } .page-heading h2 { font-size: 21px; } }
+    @media (max-width: 460px) { main { width: calc(100% - 24px); } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .metric { min-height: 100px; padding: 13px; } .metric span { font-size: 12px; } .filter-grid { grid-template-columns: 1fr; gap: 12px; } .filter-grid .search-filter { grid-column: auto; } .paper-upload { grid-template-columns: 1fr; } .paper-upload .wide { grid-column: auto; } .toolbar { padding: 14px; } .admin-avatar { flex-basis: 40px; width: 40px; height: 40px; } .pagination { align-items: flex-start; flex-direction: column; } }
+    @media (max-width: 350px) { .metrics { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -90,21 +177,58 @@
 
     <section id="dashboard" hidden>
       <div class="toolbar">
-        <div><strong id="welcome"></strong><div id="role-label" class="muted"></div></div>
-        <button id="reload" class="secondary">Refresh data</button>
+        <div class="admin-identity">
+          <div id="admin-avatar" class="admin-avatar" aria-hidden="true">CN</div>
+          <div class="admin-copy">
+            <span class="admin-eyebrow">Campus Notes · Administration</span>
+            <strong id="welcome"></strong>
+            <span id="role-label" class="role-chip"></span>
+          </div>
+        </div>
+        <button id="reload" class="secondary" type="button" aria-live="polite">Refresh data</button>
       </div>
       <p id="notice" class="notice error" role="status"></p>
       <div id="metrics" class="metrics"></div>
-      <nav id="tabs" aria-label="Admin sections">
-        <button data-section="papers" class="active">Question papers</button>
-        <button data-section="departments" class="super-only">Departments</button>
-        <button data-section="approvals" class="super-only">Institutes</button>
-        <button data-section="activity">Recent activity</button>
-      </nav>
+      <div class="workspace">
+        <aside class="sidebar">
+          <p class="sidebar-label">Workspace</p>
+          <nav id="tabs" aria-label="Admin sections">
+            <button data-section="overview" class="active" aria-current="page">Overview</button>
+            <button data-section="users">User management</button>
+            <button data-section="papers">Question papers</button>
+            <button data-section="resources">Study resources</button>
+            <button data-section="departments" class="super-only">Departments</button>
+            <button data-section="approvals" class="super-only">Institute approvals</button>
+            <button data-section="activity">Activity log</button>
+          </nav>
+        </aside>
+        <div class="content">
+      <section id="section-overview" class="section active">
+        <div class="page-heading"><h2>Dashboard overview</h2><p>A clear view of your campus notes platform.</p></div>
+        <div class="overview-grid">
+          <div class="panel">
+            <div class="panel-heading"><h3>Recent registrations</h3><button class="secondary" data-go-section="users">View users</button></div>
+            <div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th><th>Joined</th></tr></thead><tbody id="recent-users"></tbody></table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><h3>Recent question papers</h3><button class="secondary" data-go-section="papers">View library</button></div>
+            <div class="table-wrap"><table><thead><tr><th>Subject</th><th>Department</th><th>Uploaded</th></tr></thead><tbody id="recent-papers"></tbody></table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><h3>Recent administration</h3><button class="secondary" data-go-section="activity">View activity</button></div>
+            <div class="table-wrap"><table><thead><tr><th>When</th><th>Activity</th></tr></thead><tbody id="recent-activity"></tbody></table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><h3>Platform snapshot</h3></div>
+            <div class="table-wrap"><table><tbody id="platform-snapshot"></tbody></table></div>
+          </div>
+        </div>
+      </section>
 
-      <section id="section-papers" class="section active">
-        <div class="grid">
-          <form id="paper-form" class="panel form-grid">
+      <section id="section-papers" class="section">
+        <div class="page-heading"><h2>Question papers</h2><p>Manage the previous-year papers available to students.</p></div>
+        <div class="grid paper-workspace">
+          <form id="paper-form" class="panel form-grid paper-upload">
             <h2 class="wide">Upload question paper</h2>
             <label class="wide">PDF file<input name="file" type="file" accept="application/pdf,.pdf" required></label>
             <label>Subject<input name="subject" maxlength="200" required></label>
@@ -116,16 +240,61 @@
             </select></label>
             <label>Year<input name="year" value="2026" pattern="[0-9]{4}" title="Four-digit year, for example 2024" maxlength="4" required></label>
             <label class="wide">Description<textarea name="description" maxlength="2000"></textarea></label>
-            <button class="wide" type="submit">Upload paper</button>
+            <button id="paper-submit" class="wide" type="submit">Upload paper</button>
           </form>
-          <div class="panel">
-            <h2>Paper library</h2>
+          <div class="panel paper-library">
+            <div class="panel-heading"><h3>Paper library <span id="paper-count" class="badge">0</span></h3></div>
+            <div class="filter-grid">
+              <label class="search-filter">Search papers<input id="paper-search" type="search" placeholder="Subject, code, or description"></label>
+              <label>Department<select id="paper-department-filter"><option value="">All departments</option></select></label>
+              <label>Academic year<input id="paper-year-filter" inputmode="numeric" maxlength="4" placeholder="e.g. 2025"></label>
+              <label>Exam type<select id="paper-exam-filter"><option value="">All exam types</option><option>Weekly Test 1</option><option>Weekly Test 2</option><option>CIA 1</option><option>CIA 2</option><option>End Semester</option></select></label>
+            </div>
             <div class="table-wrap"><table><thead><tr><th>Paper</th><th>Department</th><th>Exam</th><th>Usage</th><th>Actions</th></tr></thead><tbody id="papers"></tbody></table></div>
           </div>
         </div>
       </section>
 
+      <section id="section-resources" class="section">
+        <div class="page-heading"><h2>Study resources</h2><p>Publish resources directly or review submissions from readers before they appear in the library.</p></div>
+        <div class="grid">
+          <form id="resource-form" class="panel form-grid">
+            <h2 class="wide">Publish a resource</h2>
+            <label class="wide">PDF file<input name="file" type="file" accept="application/pdf,.pdf" required></label>
+            <label class="wide">Title<input name="title" maxlength="200" required></label>
+            <label>Resource type<select name="resource_type" required><option value="notes">Notes</option><option value="assignments">Assignments</option><option value="other">Other study material</option></select></label>
+            <label>Department<select name="department_id" required></select></label>
+            <label>Subject (optional)<input name="subject" maxlength="200"></label>
+            <label>Semester (optional)<input name="semester" type="number" min="1" max="12"></label>
+            <label>Academic year (optional)<input name="academic_year" maxlength="8" placeholder="2026 or 2026-27"></label>
+            <label class="wide">Description (optional)<textarea name="description" maxlength="2000"></textarea></label>
+            <button id="resource-submit" class="wide" type="submit">Publish resource</button>
+          </form>
+          <div class="panel">
+            <div class="panel-heading"><h3>Resource submissions <span id="resource-count" class="badge">0</span></h3></div>
+            <label>Status filter<select id="resource-status-filter"><option value="">All statuses</option><option value="pending">Pending review</option><option value="approved">Published</option><option value="rejected">Rejected</option></select></label>
+            <div class="table-wrap"><table><thead><tr><th>Resource</th><th>Department</th><th>Submitted by</th><th>Status</th><th>Actions</th></tr></thead><tbody id="resources"></tbody></table></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-users" class="section">
+        <div class="page-heading"><h2>User management</h2><p>Find accounts and review registration details in your authorized scope.</p></div>
+        <div class="panel">
+          <div class="filter-grid">
+            <label class="search-filter">Search users<input id="user-search" type="search" placeholder="Name, email, or student identifier"></label>
+            <label>Department<select id="user-department-filter"><option value="">All departments</option></select></label>
+            <label>Role<select id="user-role-filter"><option value="">All roles</option><option value="user">Student</option><option value="super_admin">System admin</option><option value="institute">Institute</option></select></label>
+            <label>Account status<select id="user-status-filter"><option value="">All statuses</option><option value="approved">Approved / active</option><option value="pending">Pending approval</option><option value="rejected">Rejected</option></select></label>
+          </div>
+          <p id="user-count" class="muted" aria-live="polite"></p>
+          <div class="table-wrap"><table><thead><tr><th>Name / email</th><th>Student ID / username</th><th>Department</th><th>Role</th><th>Status</th><th>Joined</th><th>Actions</th></tr></thead><tbody id="users"></tbody></table></div>
+          <div class="pagination"><span id="user-page-label"></span><div class="pagination-controls"><button id="user-prev" class="secondary" type="button">Previous</button><button id="user-next" class="secondary" type="button">Next</button></div></div>
+        </div>
+      </section>
+
       <section id="section-departments" class="section">
+        <div class="page-heading"><h2>Departments</h2><p>Organize academic resources by department.</p></div>
         <div class="grid">
           <form id="department-form" class="panel form-grid">
             <h2 class="wide">Add department</h2>
@@ -138,6 +307,7 @@
       </section>
 
       <section id="section-approvals" class="section">
+        <div class="page-heading"><h2>Institute approvals</h2><p>Review institute accounts before enabling paper uploads and edits.</p></div>
         <div class="panel"><h2>Institute accounts (<span id="institute-count">0</span>)</h2>
           <p class="muted">Review institute account status. Approve pending accounts to allow paper uploads and edits from the mobile app.</p>
           <div class="table-wrap"><table><thead><tr><th>Applicant</th><th>Contact / designation</th><th>College / university</th><th>Supporting document</th><th>Requested</th><th>Status</th><th>Actions</th></tr></thead><tbody id="institute-approvals"></tbody></table></div>
@@ -145,10 +315,17 @@
       </section>
 
       <section id="section-activity" class="section">
-        <div class="panel"><h2>Recent activity</h2><div class="table-wrap"><table><thead><tr><th>When</th><th>Activity</th><th>User ID</th></tr></thead><tbody id="activity"></tbody></table></div></div>
+        <div class="page-heading"><h2>Activity log</h2><p>Recent administrative events recorded by the platform.</p></div>
+        <div class="panel"><div class="table-wrap"><table><thead><tr><th>When</th><th>Activity</th><th>User ID</th></tr></thead><tbody id="activity"></tbody></table></div></div>
       </section>
+        </div>
+      </div>
     </section>
   </main>
+  <dialog id="user-dialog">
+    <div class="panel-heading"><h2 id="user-dialog-title">User details</h2><button id="close-user-dialog" class="secondary" type="button">Close</button></div>
+    <dl id="user-details" class="detail-list"></dl>
+  </dialog>
   <dialog id="paper-dialog">
     <form id="paper-edit-form" class="form-grid">
       <h2 class="wide">Edit question paper</h2>
@@ -167,7 +344,11 @@
   </dialog>
   <script>
     const tokenKey = 'campus-notes-admin-token';
-    const state = { token: sessionStorage.getItem(tokenKey), user: null, departments: [], papers: [], editingPaper: null };
+    const state = {
+      token: sessionStorage.getItem(tokenKey), user: null, departments: [],
+      papers: [], resources: [], users: [], activity: [], stats: null, editingPaper: null, userPage: 1,
+    };
+    const USER_PAGE_SIZE = 10;
     const byId = (id) => document.getElementById(id);
     let resendTimer = null;
     if (location.protocol === 'file:') {
@@ -178,7 +359,15 @@
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[char]);
-    const toLocal = (value) => value ? new Date(value).toLocaleString() : '—';
+    const roleLabel = (role) => ({
+      user: 'Student',
+      super_admin: 'System admin', institute: 'Institute',
+    }[role] || role);
+    const toLocal = (value) => {
+      if (!value) return '—';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+    };
 
     function message(text, isError = true) {
       const node = byId('notice');
@@ -313,16 +502,9 @@
     });
 
     function setDepartments(select, selected = '') {
-      const eligible = state.user?.role === 'dept_admin'
-        ? state.departments.filter((item) => item.id === state.user.department_id)
-        : state.departments;
-      select.innerHTML = '<option value="">Select department</option>' + eligible.map((item) =>
+      select.innerHTML = '<option value="">Select department</option>' + state.departments.map((item) =>
         `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} (${escapeHtml(item.code)})</option>`).join('');
       if (selected) select.value = selected;
-      if (state.user?.role === 'dept_admin') {
-        select.value = state.user.department_id || '';
-        select.disabled = true;
-      }
     }
 
     function safePaperUrl(value) {
@@ -331,17 +513,42 @@
       return url.origin === location.origin && url.pathname.startsWith('/uploads/') ? url.href : '';
     }
 
-    function renderMetrics(stats) {
+    function renderMetrics(stats, users) {
+      const students = users.filter((user) => user.role === 'user').length;
+      const pendingInstitutes = users.filter((user) =>
+        user.role === 'institute' && user.approval_status === 'pending').length;
+      const subjects = new Set(state.papers.map((paper) =>
+        `${paper.department_id}:${String(paper.subject_code || paper.subject).trim().toLocaleLowerCase()}`));
       const values = [
-        ['Papers', stats.totalPapers], ['Views', stats.totalViews],
-        ['Downloads', stats.totalDownloads], ['Departments', stats.totalDepartments],
+        ['Registered students', students],
+        ['Question papers', stats.totalPapers],
+        ['Subjects in library', subjects.size],
+        ['Departments', stats.totalDepartments],
+        ['Pending resource approvals', state.resources.filter((resource) => resource.status === 'pending').length],
+        ...(state.user.role === 'super_admin' ? [['Pending institutes', pendingInstitutes]] : []),
       ];
       byId('metrics').innerHTML = values.map(([label, value]) =>
-        `<div class="card metric"><strong>${escapeHtml(value)}</strong><span>${label}</span></div>`).join('');
+        `<div class="card metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+      byId('platform-snapshot').innerHTML = [
+        ['Paper views', stats.totalViews],
+        ['Paper downloads', stats.totalDownloads],
+        ['Registered accounts in your scope', users.length],
+      ].map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td><strong>${escapeHtml(value)}</strong></td></tr>`).join('');
     }
 
     function renderPapers() {
-      byId('papers').innerHTML = state.papers.map((paper) => {
+      const search = byId('paper-search').value.trim().toLocaleLowerCase();
+      const departmentId = byId('paper-department-filter').value;
+      const year = byId('paper-year-filter').value.trim();
+      const examType = byId('paper-exam-filter').value;
+      const papers = state.papers.filter((paper) =>
+        (!search || [paper.subject, paper.subject_code, paper.description]
+          .some((value) => String(value || '').toLocaleLowerCase().includes(search))) &&
+        (!departmentId || paper.department_id === departmentId) &&
+        (!year || String(paper.year).includes(year)) &&
+        (!examType || paper.exam_type === examType));
+      byId('paper-count').textContent = String(papers.length);
+      byId('papers').innerHTML = papers.map((paper) => {
         const fileUrl = safePaperUrl(paper.file_url);
         return `<tr>
           <td><strong>${escapeHtml(paper.subject)}</strong><div class="muted">${escapeHtml(paper.subject_code || '')} · Sem ${escapeHtml(paper.semester)} · ${escapeHtml(paper.year)}</div>
@@ -351,7 +558,90 @@
           <td>${escapeHtml(paper.views)} views<br>${escapeHtml(paper.downloads)} downloads</td>
           <td class="actions"><button class="secondary" data-edit-paper="${escapeHtml(paper.id)}">Edit</button><button class="danger" data-delete-paper="${escapeHtml(paper.id)}">Delete</button></td>
         </tr>`;
-      }).join('') || '<tr><td colspan="5" class="muted">No papers found.</td></tr>';
+      }).join('') || '<tr><td colspan="5" class="empty-state">No question papers match these filters.</td></tr>';
+    }
+
+    function renderResources() {
+      const status = byId('resource-status-filter').value;
+      const resources = state.resources.filter((resource) => !status || resource.status === status);
+      byId('resource-count').textContent = String(resources.length);
+      byId('resources').innerHTML = resources.map((resource) => `
+        <tr>
+          <td><strong>${escapeHtml(resource.title)}</strong><div class="muted">${escapeHtml(resource.resource_type)}${resource.subject ? ` · ${escapeHtml(resource.subject)}` : ''}</div></td>
+          <td>${escapeHtml(resource.department_name || '—')}</td>
+          <td>${escapeHtml(resource.uploaded_by_name || 'Account unavailable')}<div class="muted">${escapeHtml(toLocal(resource.created_at))}</div></td>
+          <td>${escapeHtml(resource.status)}</td>
+          <td class="actions">
+            <button class="secondary" data-resource-file="${escapeHtml(resource.id)}">View PDF</button>
+            ${resource.status === 'pending' ? `<button data-review-resource="approved" data-resource-id="${escapeHtml(resource.id)}">Approve</button><button class="danger" data-review-resource="rejected" data-resource-id="${escapeHtml(resource.id)}">Reject</button>` : ''}
+            <button class="danger" data-delete-resource="${escapeHtml(resource.id)}">Delete</button>
+          </td>
+        </tr>`).join('') || '<tr><td colspan="5" class="empty-state">No resources match this status.</td></tr>';
+    }
+
+    function filteredUsers() {
+      const search = byId('user-search').value.trim().toLocaleLowerCase();
+      const departmentId = byId('user-department-filter').value;
+      const role = byId('user-role-filter').value;
+      const approvalStatus = byId('user-status-filter').value;
+      return state.users.filter((user) => {
+        const searchable = [user.name, user.email, user.username]
+          .some((value) => String(value || '').toLocaleLowerCase().includes(search));
+        return (!search || searchable) &&
+          (!departmentId || user.department_id === departmentId) &&
+          (!role || user.role === role) &&
+          (!approvalStatus || (user.approval_status || 'approved') === approvalStatus);
+      });
+    }
+
+    function renderUsers() {
+      const matches = filteredUsers();
+      const pageCount = Math.max(1, Math.ceil(matches.length / USER_PAGE_SIZE));
+      state.userPage = Math.min(state.userPage, pageCount);
+      const start = (state.userPage - 1) * USER_PAGE_SIZE;
+      const departmentNames = new Map(state.departments.map((department) => [department.id, department.name]));
+      const pageUsers = matches.slice(start, start + USER_PAGE_SIZE);
+      byId('user-count').textContent = `${matches.length} account${matches.length === 1 ? '' : 's'} in your authorized scope`;
+      byId('user-page-label').textContent = matches.length
+        ? `Showing ${start + 1}–${Math.min(start + USER_PAGE_SIZE, matches.length)} of ${matches.length}`
+        : 'No accounts to show';
+      byId('user-prev').disabled = state.userPage <= 1;
+      byId('user-next').disabled = state.userPage >= pageCount;
+      byId('users').innerHTML = pageUsers.map((user) => {
+        const status = user.approval_status || 'approved';
+        const statusLabel = user.role === 'institute' ? status : 'active';
+        const canDelete = state.user.role === 'super_admin' &&
+          user.role !== 'super_admin' && user.id !== state.user.id;
+        return `<tr>
+          <td><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)}</div></td>
+          <td>${escapeHtml(user.username || '—')}</td>
+          <td>${escapeHtml(departmentNames.get(user.department_id) || '—')}</td>
+          <td>${escapeHtml(roleLabel(user.role))}</td>
+          <td><span class="badge ${escapeHtml(statusLabel)}">${escapeHtml(statusLabel)}</span></td>
+          <td>${escapeHtml(toLocal(user.created_at))}</td>
+          <td class="actions"><button class="secondary" data-view-user="${escapeHtml(user.id)}">View</button>
+            ${canDelete ? `<button class="danger" data-delete-user="${escapeHtml(user.id)}">Remove</button>` : ''}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="7" class="empty-state">No accounts match these filters.</td></tr>';
+    }
+
+    function renderRecentData(stats) {
+      const departmentNames = new Map(state.departments.map((department) => [department.id, department.name]));
+      const recentUsers = [...state.users]
+        .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+        .slice(0, 5);
+      byId('recent-users').innerHTML = recentUsers.map((user) =>
+        `<tr><td><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)}</div></td>
+          <td>${escapeHtml(roleLabel(user.role))}</td><td>${escapeHtml(toLocal(user.created_at))}</td></tr>`
+      ).join('') || '<tr><td colspan="3" class="empty-state">No registrations found.</td></tr>';
+      byId('recent-papers').innerHTML = state.papers.slice(0, 5).map((paper) =>
+        `<tr><td><strong>${escapeHtml(paper.subject)}</strong><div class="muted">${escapeHtml(paper.exam_type)} · ${escapeHtml(paper.year)}</div></td>
+          <td>${escapeHtml(paper.department_name || departmentNames.get(paper.department_id) || '—')}</td><td>${escapeHtml(toLocal(paper.created_at))}</td></tr>`
+      ).join('') || '<tr><td colspan="3" class="empty-state">No question papers found.</td></tr>';
+      byId('recent-activity').innerHTML = state.activity.slice(0, 5).map((item) =>
+        `<tr><td>${escapeHtml(toLocal(item.created_at))}</td><td>${escapeHtml(item.message)}</td></tr>`
+      ).join('') || '<tr><td colspan="2" class="empty-state">No recent activity.</td></tr>';
+      renderMetrics(stats, state.users);
     }
 
     function renderDepartments() {
@@ -382,33 +672,53 @@
     function renderActivity(items) {
       byId('activity').innerHTML = items.map((item) =>
         `<tr><td>${escapeHtml(toLocal(item.created_at))}</td><td>${escapeHtml(item.message)}</td><td>${escapeHtml(item.user_id)}</td></tr>`).join('')
-        || '<tr><td colspan="3" class="muted">No recent activity.</td></tr>';
+        || '<tr><td colspan="3" class="empty-state">No recent activity.</td></tr>';
     }
 
     async function loadDashboard() {
       message('');
-      const [stats, departments, papers, activity] = await Promise.all([
-        api('/api/stats'), api('/api/departments'), api('/api/papers'), api('/api/activity?limit=50'),
+      byId('metrics').innerHTML = '<div class="card metric"><span>Loading dashboard</span><strong>…</strong></div>';
+      const [stats, departments, papers, resources, activity, users] = await Promise.all([
+        api('/api/stats'), api('/api/departments'), api('/api/papers'),
+        api('/api/resources'), api('/api/activity?limit=50'), api('/api/users'),
       ]);
+      state.stats = stats;
       state.departments = departments;
       state.papers = papers;
-      renderMetrics(stats);
+      state.resources = resources;
+      state.activity = activity;
+      state.users = users;
+      state.userPage = 1;
+      populateDashboardFilters();
+      renderRecentData(stats);
+      renderUsers();
       renderPapers();
+      renderResources();
       renderDepartments();
       renderActivity(activity);
       setDepartments(byId('paper-form').elements.department_id);
-      const institutes = await api('/api/users?role=institute');
+      setDepartments(byId('resource-form').elements.department_id);
+      const institutes = users.filter((account) => account.role === 'institute');
       renderInstituteApprovals(institutes, state.user.role === 'super_admin');
     }
 
+    function populateDashboardFilters() {
+      const departmentOptions = state.departments.map((department) =>
+        `<option value="${escapeHtml(department.id)}">${escapeHtml(department.name)}</option>`).join('');
+      byId('paper-department-filter').innerHTML = '<option value="">All departments</option>' + departmentOptions;
+      byId('user-department-filter').innerHTML = '<option value="">All departments</option>' + departmentOptions;
+    }
+
     async function showDashboard(user) {
-      if (!['dept_admin', 'super_admin'].includes(user.role)) {
+      if (user.role !== 'super_admin') {
         signOut();
         throw new Error('This account is not an administrator.');
       }
       state.user = user;
       byId('welcome').textContent = `Signed in as ${user.name}`;
-      byId('role-label').textContent = user.role === 'super_admin' ? 'System administrator' : 'Department administrator';
+      byId('role-label').textContent = 'System administrator';
+      byId('admin-avatar').textContent = user.name.split(/\s+/).filter(Boolean)
+        .slice(0, 2).map((part) => part[0].toLocaleUpperCase()).join('') || 'CN';
       document.querySelectorAll('.super-only').forEach((node) => { node.hidden = user.role !== 'super_admin'; });
       byId('login').hidden = true;
       byId('dashboard').hidden = false;
@@ -425,14 +735,15 @@
           method: 'POST',
           body: JSON.stringify({ email: form.get('email'), password: form.get('password') }),
         });
-        if (!['dept_admin', 'super_admin'].includes(result.user.role)) {
+        if (result.user.role !== 'super_admin') {
           throw new Error('Use the Campus-notes mobile app to sign in as a reader.');
         }
         state.token = result.session.access_token;
         sessionStorage.setItem(tokenKey, state.token);
         await showDashboard(result.user);
       } catch (err) {
-        showLoginError(err.message);
+        if (byId('dashboard').hidden) showLoginError(err.message);
+        else message(err.message);
       }
     });
 
@@ -441,18 +752,105 @@
       try { await api('/api/auth/logout', { method: 'POST' }); } catch (err) { message(err.message); }
       signOut();
     });
-    byId('reload').addEventListener('click', () => loadDashboard().catch((err) => message(err.message)));
+    byId('reload').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.textContent = 'Refreshing…';
+      try {
+        await loadDashboard();
+        message('Dashboard data refreshed.', false);
+      } catch (err) {
+        message(err.message);
+      } finally {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+        button.textContent = 'Refresh data';
+      }
+    });
+
+    function activateSection(sectionName) {
+      const button = document.querySelector(`#tabs button[data-section="${sectionName}"]`);
+      if (!button || button.hidden) return;
+      document.querySelectorAll('#tabs button').forEach((item) => {
+        const active = item === button;
+        item.classList.toggle('active', active);
+        if (active) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+      });
+      document.querySelectorAll('.section').forEach((section) =>
+        section.classList.toggle('active', section.id === `section-${sectionName}`));
+    }
+
     byId('tabs').addEventListener('click', (event) => {
       const button = event.target.closest('button[data-section]');
       if (!button || button.hidden) return;
-      document.querySelectorAll('#tabs button').forEach((item) => item.classList.toggle('active', item === button));
-      document.querySelectorAll('.section').forEach((section) => section.classList.toggle('active', section.id === `section-${button.dataset.section}`));
+      activateSection(button.dataset.section);
+    });
+    byId('dashboard').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-go-section]');
+      if (button) activateSection(button.dataset.goSection);
+    });
+    ['user-search', 'user-department-filter', 'user-role-filter', 'user-status-filter'].forEach((id) => {
+      byId(id).addEventListener(id === 'user-search' ? 'input' : 'change', () => {
+        state.userPage = 1;
+        renderUsers();
+      });
+    });
+    ['paper-search', 'paper-year-filter'].forEach((id) =>
+      byId(id).addEventListener('input', renderPapers));
+    ['paper-department-filter', 'paper-exam-filter'].forEach((id) =>
+      byId(id).addEventListener('change', renderPapers));
+    byId('user-prev').addEventListener('click', () => {
+      state.userPage = Math.max(1, state.userPage - 1);
+      renderUsers();
+    });
+    byId('user-next').addEventListener('click', () => {
+      state.userPage += 1;
+      renderUsers();
+    });
+    byId('close-user-dialog').addEventListener('click', () => byId('user-dialog').close());
+    byId('users').addEventListener('click', async (event) => {
+      const view = event.target.closest('[data-view-user]');
+      const remove = event.target.closest('[data-delete-user]');
+      if (view) {
+        const account = state.users.find((user) => user.id === view.dataset.viewUser);
+        if (!account) {
+          message('User account was not found.');
+          return;
+        }
+        const department = state.departments.find((item) => item.id === account.department_id);
+        byId('user-details').innerHTML = [
+          ['Name', account.name], ['Email', account.email], ['Student identifier', account.username || '—'],
+          ['Department', department?.name || '—'], ['Role', roleLabel(account.role)],
+          ['Status', account.role === 'institute' ? account.approval_status : 'Active'],
+          ['Registered', toLocal(account.created_at)],
+        ].map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('');
+        byId('user-dialog').showModal();
+        return;
+      }
+      if (!remove) return;
+      const account = state.users.find((user) => user.id === remove.dataset.deleteUser);
+      if (!account || state.user.role !== 'super_admin' || account.role === 'super_admin' ||
+          account.id === state.user.id) {
+        message('This account cannot be removed with your permissions.');
+        return;
+      }
+      if (!confirm(`Remove ${account.name}'s account? This cannot be undone.`)) return;
+      try {
+        await api(`/api/users/${encodeURIComponent(account.id)}`, { method: 'DELETE' });
+        await loadDashboard();
+        message('User account removed.', false);
+      } catch (err) { message(err.message); }
     });
 
     byId('paper-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const values = new FormData(form);
+      const submit = byId('paper-submit');
+      submit.disabled = true;
+      submit.textContent = 'Uploading…';
       try {
         const uploaded = await api('/api/uploads', { method: 'POST', body: new FormData(form) });
         await api('/api/papers', {
@@ -469,6 +867,67 @@
         form.elements.year.value = String(new Date().getFullYear());
         await loadDashboard();
         message('Paper uploaded successfully.', false);
+      } catch (err) { message(err.message); }
+      finally {
+        submit.disabled = false;
+        submit.textContent = 'Upload paper';
+      }
+    });
+
+    byId('resource-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const submit = byId('resource-submit');
+      const values = new FormData(form);
+      for (const field of ['subject', 'semester', 'academic_year', 'description']) {
+        if (!String(values.get(field) || '').trim()) values.delete(field);
+      }
+      submit.disabled = true;
+      submit.textContent = 'Publishing…';
+      try {
+        await api('/api/resources', { method: 'POST', body: values });
+        form.reset();
+        await loadDashboard();
+        message('Resource published and is available to readers.', false);
+      } catch (err) { message(err.message); }
+      finally {
+        submit.disabled = false;
+        submit.textContent = 'Publish resource';
+      }
+    });
+
+    byId('resource-status-filter').addEventListener('change', renderResources);
+    byId('resources').addEventListener('click', async (event) => {
+      const review = event.target.closest('[data-review-resource]');
+      const file = event.target.closest('[data-resource-file]');
+      const remove = event.target.closest('[data-delete-resource]');
+      try {
+        if (review) {
+          const action = review.dataset.reviewResource;
+          if (action === 'rejected' && !confirm('Reject this reader submission?')) return;
+          await api(`/api/resources/${encodeURIComponent(review.dataset.resourceId)}/review`, {
+            method: 'PUT',
+            body: JSON.stringify({ status: action }),
+          });
+          await loadDashboard();
+          message(`Resource ${action}.`, false);
+        } else if (file) {
+          const response = await fetch(`/api/resources/${encodeURIComponent(file.dataset.resourceFile)}/file`, {
+            headers: { Authorization: `Bearer ${state.token}` },
+          });
+          if (!response.ok) throw new Error('Could not open this resource PDF.');
+          const url = URL.createObjectURL(await response.blob());
+          const link = document.createElement('a');
+          link.href = url;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        } else if (remove && confirm('Delete this resource and its uploaded PDF? This cannot be undone.')) {
+          await api(`/api/resources/${encodeURIComponent(remove.dataset.deleteResource)}`, { method: 'DELETE' });
+          await loadDashboard();
+          message('Resource deleted.', false);
+        }
       } catch (err) { message(err.message); }
     });
 
@@ -551,7 +1010,7 @@
           await api(`/api/departments/${encodeURIComponent(department.id)}`, { method: 'PUT', body: JSON.stringify({ name: name.trim(), code: code.trim() }) });
           await loadDashboard();
           message('Department updated.', false);
-        } else if (remove && confirm('Delete this department? Its question papers, the students\u2019 favourites for those papers, and its department administrator accounts will also be deleted. This cannot be undone.')) {
+        } else if (remove && confirm('Delete this department? Its question papers and the students\u2019 favourites for those papers will also be deleted. This cannot be undone.')) {
           try {
             await api(`/api/departments/${encodeURIComponent(remove.dataset.deleteDepartment)}`, { method: 'DELETE' });
           } catch (deleteError) {
@@ -597,19 +1056,31 @@
       if (!action || !userId) return;
       if (action === 'rejected' && !confirm('Reject this institute account request?')) return;
       try {
-        await api(`/api/users/${encodeURIComponent(userId)}/approval`, {
+        const result = await api(`/api/users/${encodeURIComponent(userId)}/approval`, {
           method: 'PUT',
           body: JSON.stringify({ approval_status: action }),
         });
         await loadDashboard();
-        message(`Institute account ${action}.`, false);
+        message(
+          action === 'approved' && result.approval_email_sent === false
+            ? 'Institute account approved, but the confirmation email could not be sent. Check SMTP settings and server logs.'
+            : `Institute account ${action}.`,
+          false,
+        );
       } catch (err) { message(err.message); }
     });
 
     if (state.token) {
       api('/api/auth/me')
         .then((result) => showDashboard(result.user))
-        .catch((err) => message(`Please sign in again: ${err.message}`));
+        .catch((err) => {
+          if (state.user) {
+            message(err.message);
+            return;
+          }
+          signOut();
+          showLoginError(`Please sign in again: ${err.message}`);
+        });
     }
   </script>
 </body>

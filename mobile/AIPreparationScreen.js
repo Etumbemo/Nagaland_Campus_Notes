@@ -8,7 +8,6 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
 import { COLORS } from './src/constants/colors';
 import { generateAiPreparation, getAiPreparationOptions } from './api';
 
@@ -25,6 +24,55 @@ const FEATURES = [
   },
 ];
 const EMPTY_YEARS = [];
+
+function ThemedSelect({ value, options, onChange, disabled, label }) {
+  const [visible, setVisible] = useState(false);
+  const selected = options.find((option) => String(option.value) === String(value));
+
+  return (
+    <>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${label}: ${selected?.label || 'Choose'}`}
+        disabled={disabled}
+        onPress={() => setVisible(true)}
+        style={[styles.picker, disabled && styles.disabledOption]}
+      >
+        <Text numberOfLines={1} style={styles.selectValue}>{selected?.label || 'Choose'}</Text>
+        <Text style={styles.selectArrow}>v</Text>
+      </Pressable>
+      {visible ? (
+        <View style={styles.selectDialog}>
+          <Text style={styles.selectTitle}>{label}</Text>
+          <ScrollView style={styles.selectOptions} nestedScrollEnabled>
+            {options.map((option) => {
+              const isSelected = String(option.value) === String(value);
+              return (
+                <Pressable
+                  key={String(option.value)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => {
+                    onChange(option.value);
+                    setVisible(false);
+                  }}
+                  style={[styles.selectOption, isSelected && styles.selectOptionSelected]}
+                >
+                  <Text style={[styles.selectOptionText, isSelected && styles.selectOptionSelectedText]}>
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          <Pressable onPress={() => setVisible(false)} style={styles.selectClose}>
+            <Text style={styles.selectCloseText}>Cancel</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </>
+  );
+}
 
 function normalizeAnswer(value) {
   return String(value || '').trim().toLocaleLowerCase();
@@ -441,54 +489,45 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
           <Text style={styles.sectionTitle}>2. Select subject and paper scope</Text>
           <Text style={styles.label}>Subject · department · semester</Text>
           <View style={styles.pickerContainer}>
-            <Picker
-              enabled={!loadingGeneration}
-              onValueChange={chooseSubject}
-              selectedValue={subjectIndex}
-              style={styles.picker}
-              dropdownIconColor={COLORS.white}
-            >
-              {subjects.map((subject, index) => (
-                <Picker.Item
-                  key={`${subject.departmentId}-${subject.semester}-${subject.subjectCode || subject.subject}-${index}`}
-                  label={`${subject.subject}${subject.subjectCode ? ` (${subject.subjectCode})` : ''} · ${subject.departmentName || 'Department'} · Sem ${subject.semester}`}
-                  value={String(index)}
-                />
-              ))}
-            </Picker>
+            <ThemedSelect
+              label="Choose subject"
+              disabled={loadingGeneration}
+              value={subjectIndex}
+              onChange={chooseSubject}
+              options={subjects.map((subject, index) => ({
+                value: String(index),
+                label: `${subject.subject}${subject.subjectCode ? ` (${subject.subjectCode})` : ''} · ${subject.departmentName || 'Department'} · Sem ${subject.semester}`,
+              }))}
+            />
           </View>
 
           {selectedSubject ? (
             <>
               <Text style={styles.label}>Start year</Text>
               <View style={styles.pickerContainer}>
-                <Picker
-                  selectedValue={startYear}
-                  onValueChange={(value) => {
+                <ThemedSelect
+                  label="Start year"
+                  value={startYear}
+                  onChange={(value) => {
                     setStartYear(Number(value));
                     setResult(null);
                   }}
-                  enabled={!loadingGeneration}
-                  style={styles.picker}
-                  dropdownIconColor={COLORS.white}
-                >
-                  {availableYears.map((year) => <Picker.Item key={year} label={String(year)} value={year} />)}
-                </Picker>
+                  disabled={loadingGeneration}
+                  options={availableYears.map((year) => ({ label: String(year), value: year }))}
+                />
               </View>
               <Text style={styles.label}>End year</Text>
               <View style={styles.pickerContainer}>
-                <Picker
-                  selectedValue={endYear}
-                  onValueChange={(value) => {
+                <ThemedSelect
+                  label="End year"
+                  value={endYear}
+                  onChange={(value) => {
                     setEndYear(Number(value));
                     setResult(null);
                   }}
-                  enabled={!loadingGeneration}
-                  style={styles.picker}
-                  dropdownIconColor={COLORS.white}
-                >
-                  {availableYears.map((year) => <Picker.Item key={year} label={String(year)} value={year} />)}
-                </Picker>
+                  disabled={loadingGeneration}
+                  options={availableYears.map((year) => ({ label: String(year), value: year }))}
+                />
               </View>
               <Text style={styles.bodyText}>
                 Available years: {availableYears.join(', ')}.
@@ -549,11 +588,11 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
           >
             <Text style={styles.checkbox}>{hostedConsent ? '☑' : '☐'}</Text>
             <Text style={styles.bodyText}>
-              I consent to the selected PDF text being sent to the configured hosted AI provider only if local Ollama is unavailable. Local AI is tried first.
+              Use Groq for this generation. I consent to sending the selected PDF text to Groq. If Groq is unavailable, local Ollama will be tried. Leave unchecked to use local Ollama only.
             </Text>
           </Pressable>
           <Text style={styles.mutedText}>
-            If neither AI provider is available, generation will fail with a retry message.
+            Groq use is subject to your account's free-tier limits.
           </Text>
 
           <Text style={styles.sectionTitle}>4. Review</Text>
@@ -635,9 +674,36 @@ const styles = StyleSheet.create({
     borderColor: COLORS.glassBorder,
     borderRadius: 12,
     backgroundColor: COLORS.glassInput,
-    overflow: 'hidden',
   },
-  picker: { color: COLORS.white, minHeight: 48 },
+  picker: {
+    minHeight: 48,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  selectValue: { color: COLORS.white, flex: 1, fontSize: 15 },
+  selectArrow: { color: COLORS.mintGreen, fontSize: 21, fontWeight: '800' },
+  selectDialog: {
+    width: '100%',
+    maxHeight: 280,
+    marginTop: 8,
+    padding: 12,
+    gap: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    backgroundColor: COLORS.deepNavy,
+  },
+  selectTitle: { color: COLORS.white, fontSize: 18, fontWeight: '800' },
+  selectOptions: { flexGrow: 0, maxHeight: 190 },
+  selectOption: { paddingVertical: 13, paddingHorizontal: 12, borderRadius: 10 },
+  selectOptionSelected: { backgroundColor: COLORS.forestGreen },
+  selectOptionText: { color: COLORS.coolGrey, fontSize: 15, lineHeight: 21 },
+  selectOptionSelectedText: { color: COLORS.white, fontWeight: '700' },
+  selectClose: { alignSelf: 'flex-end', paddingVertical: 8, paddingHorizontal: 12 },
+  selectCloseText: { color: COLORS.mintGreen, fontSize: 15, fontWeight: '700' },
   input: {
     borderWidth: 1,
     borderColor: COLORS.glassBorder,

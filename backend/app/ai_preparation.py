@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 from collections import OrderedDict
 from difflib import SequenceMatcher
@@ -227,6 +228,12 @@ def _ocr_page(page, filename: str) -> str:
         ) from error
 
     tesseract_command = os.getenv("TESSERACT_CMD", "").strip()
+    if not tesseract_command:
+        tesseract_command = shutil.which("tesseract") or ""
+    if not tesseract_command and os.name == "nt":
+        windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+        if windows_tesseract.is_file():
+            tesseract_command = str(windows_tesseract)
     if tesseract_command:
         pytesseract.pytesseract.tesseract_cmd = tesseract_command
     try:
@@ -281,7 +288,9 @@ def build_ai_prompt(
     )
     return f"""You analyze only the supplied previous-year question-paper excerpts.
 Do not invent source papers, years, pages, question numbers, recurrence, or marks.
-Return one valid JSON object and no markdown, using this shape:
+Return one valid JSON object and no markdown. The outermost object must contain a
+"questions" key whose value is an array, even when you can support only one
+question. Do not return a bare question object or rename the key. Use this shape:
 {{
   "questions": [
     {{
@@ -404,38 +413,107 @@ def _call_hosted(prompt: str) -> str:
 
 
 def generate_with_fallback(prompt: str, *, allow_hosted_fallback: bool) -> tuple[str, str]:
+    # Consent means the student chose hosted processing for this request. Try
+    # the configured Groq endpoint first; otherwise keep the paper text local.
+    hosted_error = None
+    if allow_hosted_fallback and _hosted_provider_configured():
+        try:
+            return _call_hosted(prompt), "hosted"
+        except AIProviderError as error:
+            hosted_error = error
+            logger.warning("Hosted AI provider failed; trying local Ollama: %s", hosted_error)
+
     try:
         return _call_ollama(prompt), "local"
     except AIProviderError as local_error:
         logger.warning("Local AI provider failed: %s", local_error)
+    if hosted_error:
+        raise AIUnavailableError(
+            "Groq and local AI are unavailable. Please retry later."
+        ) from hosted_error
     if not _hosted_provider_configured():
         raise AIUnavailableError(
-            "Local AI is unavailable and hosted AI fallback is not configured. "
+            "Local AI is unavailable and the hosted AI provider is not configured. "
             "Try again later or contact the administrator."
         )
     if not allow_hosted_fallback:
         raise AIUnavailableError(
-            "Local AI is unavailable. To use the configured hosted fallback, consent "
-            "to sending the selected PDF text to the hosted provider."
+            "Local AI is unavailable. Consent to send the selected PDF text to Groq "
+            "to use the hosted provider."
         )
-    try:
-        return _call_hosted(prompt), "hosted"
-    except AIProviderError as hosted_error:
-        logger.warning("Hosted AI fallback failed: %s", hosted_error)
-        raise AIUnavailableError(
-            "Local and hosted AI providers are unavailable. Please retry later."
-        ) from hosted_error
+    raise AIUnavailableError("The configured AI providers are unavailable. Please retry later.")
 
 
 def parse_ai_questions(response_text: str) -> list[dict]:
-    content = response_text.strip()
-    if content.startswith("```"):
-        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
+    def decode_json(content: str):
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # A model can wrap the JSON payload in a short explanation even
+            # when asked for JSON-only output. Decode the first complete JSON
+            # value and let schema validation decide whether it is usable.
+            decoder = json.JSONDecoder()
+            for index, character in enumerate(content):
+                if character not in "[{":
+                    continue
+                try:
+                    value, _ = decoder.raw_decode(content[index:])
+                    return value
+                except json.JSONDecodeError:
+                    continue
+            raise
+
     try:
-        payload = json.loads(content)
+        payload = decode_json(response_text)
     except json.JSONDecodeError as error:
         raise AIProviderError("The AI provider returned unreadable question data.") from error
-    questions = payload.get("questions") if isinstance(payload, dict) else None
+
+    # Some local models follow Ollama's JSON mode with a generic response
+    # envelope, e.g. {"response": "{\"questions\": [...]}"}. Unwrap up to two
+    # layers so the same strict validation can inspect the actual questions.
+    for _ in range(2):
+        if not isinstance(payload, dict):
+            break
+        has_question_list = any(
+            str(key).casefold() in {"questions", "question_list", "items"}
+            for key in payload
+        )
+        if has_question_list or isinstance(payload.get("question"), str):
+            break
+        wrapper = next(
+            (
+                value for key, value in payload.items()
+                if str(key).casefold() in {"response", "output", "content", "result"}
+            ),
+            None,
+        )
+        if isinstance(wrapper, dict):
+            payload = wrapper
+        elif isinstance(wrapper, str):
+            try:
+                payload = decode_json(wrapper)
+            except json.JSONDecodeError:
+                break
+        else:
+            break
+
+    questions = None
+    if isinstance(payload, dict):
+        # Models sometimes change the key's casing or use a generic list key.
+        # Accept those equivalent shapes while leaving each question subject to
+        # the full validation and source-grounding checks below.
+        for key, value in payload.items():
+            if str(key).casefold() in {"questions", "question_list", "items"}:
+                questions = value
+                break
+        # Some models ignore the requested array wrapper and return one complete
+        # question object. Preserve it as a one-item list; validation still checks
+        # every field, citation, and priority before anything reaches the user.
+        if questions is None and isinstance(payload.get("question"), str):
+            questions = [payload]
     if not isinstance(questions, list):
         raise AIProviderError("The AI provider returned no question list.")
     return questions

@@ -34,3 +34,35 @@ def send_password_reset_otp(email: str, name: str, otp: str) -> None:
         if username:
             smtp.login(username, password)
         smtp.send_message(message)
+
+
+def send_institute_approval_email(email: str, name: str, institute_name: str) -> None:
+    host = os.getenv("SMTP_HOST", "").strip()
+    sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    if not host or not sender:
+        raise RuntimeError("Approval email is not configured. Set SMTP_HOST and SMTP_FROM_EMAIL.")
+
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+    if username and not password:
+        raise RuntimeError("SMTP_PASSWORD is required when SMTP_USERNAME is configured.")
+    use_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true", "yes"}
+    sender_name = os.getenv("SMTP_FROM_NAME", "Campus-notes").strip()
+
+    message = EmailMessage()
+    message["Subject"] = "Your Campus-notes institute account is approved"
+    message["From"] = f"{sender_name} <{sender}>"
+    message["To"] = email
+    message.set_content(
+        f"Hello {name},\n\n"
+        f"Your institute staff account for {institute_name} has been approved.\n"
+        "You can now sign in to Campus-notes to upload and edit question papers."
+    )
+
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(message)

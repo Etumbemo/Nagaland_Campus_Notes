@@ -3,6 +3,8 @@ import {
   Alert,
   Image,
   Linking,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,6 +20,7 @@ import * as Sharing from 'expo-sharing';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import {
   request, getStoredUser, register, signIn, signOut, uploadPdf,
+  uploadStudyResource, downloadStudyResource,
   requestPasswordReset, confirmPasswordReset,
 } from './api';
 import AIPreparationScreen from './AIPreparationScreen';
@@ -25,6 +28,15 @@ import AIPreparationScreen from './AIPreparationScreen';
 import { COLORS } from './src/constants/colors';
 const EXAM_TYPES = ['Weekly Test 1', 'Weekly Test 2', 'CIA 1', 'CIA 2', 'End Semester'];
 const PASSWORD_REQUIREMENTS = 'At least 8 characters, including one uppercase letter and one special symbol.';
+let themedAlertDispatcher = null;
+
+function showThemedAlert(title, message, buttons) {
+  if (themedAlertDispatcher) {
+    themedAlertDispatcher(title, message, buttons);
+  } else {
+    Alert.alert(title, message, buttons);
+  }
+}
 
 function isPasswordValid(password) {
   return password.length >= 8
@@ -84,11 +96,12 @@ function ActionButton({ title, onPress, disabled, secondary, compact }) {
     <Pressable
       disabled={disabled}
       onPress={onPress}
-      style={[
+      style={({ pressed }) => [
         styles.button,
         secondary && styles.secondaryButton,
         compact && styles.compactButton,
         disabled && styles.disabledButton,
+        pressed && !disabled && styles.buttonPressed,
       ]}
     >
       <Text style={[styles.buttonText, secondary && styles.secondaryButtonText]}>
@@ -108,7 +121,7 @@ function Notice({ message, onDismiss }) {
   );
 }
 
-function PaperCard({ paper, favorite, onFavorite, onOpen, onDownload }) {
+function PaperCard({ paper, favorite, onFavorite, onOpen, onDownload, onShare }) {
   return (
     <View style={styles.card}>
       <View style={styles.rowBetween}>
@@ -141,6 +154,7 @@ function PaperCard({ paper, favorite, onFavorite, onOpen, onDownload }) {
       <View style={styles.actions}>
         <ActionButton title="View PDF" compact onPress={onOpen} disabled={!paper.fileUrl} />
         <ActionButton title="Download" compact secondary onPress={onDownload} disabled={!paper.fileUrl} />
+        <ActionButton title="Share" compact secondary onPress={onShare} disabled={!paper.fileUrl} />
       </View>
     </View>
   );
@@ -155,6 +169,7 @@ function HomeScreen({
   onBrowse,
   onOpenPaper,
   onDownloadPaper,
+  onSharePaper,
   onAIPreparation,
   compact,
 }) {
@@ -191,10 +206,6 @@ function HomeScreen({
 
   return (
     <View style={styles.homeContainer}>
-      <View style={styles.ambientOrbTopRight} pointerEvents="none" />
-      <View style={styles.ambientOrbTopLeft} pointerEvents="none" />
-      <View style={styles.ambientOrbCenter} pointerEvents="none" />
-
       <ScrollView contentContainerStyle={styles.homeScrollContent} showsVerticalScrollIndicator={false}>
         {/* Welcome Glass Banner */}
         <View style={[styles.heroGlass, compact && styles.heroCompact]}>
@@ -204,7 +215,7 @@ function HomeScreen({
             <Text style={styles.eyebrowLocation}>NAGALAND</Text>
           </View>
           <Text style={[styles.heroTitle, compact && styles.heroTitleCompact]}>
-            {user?.name ? `Welcome back,\n${user.name} 👋` : 'College Study Notes &\nQuestion Papers'}
+            {user?.name ? `Welcome back,\n${user.name}` : 'College Study Notes &\nQuestion Papers'}
           </Text>
           <Text style={styles.heroCopy}>
             Access, read, and download official previous semester examination papers across Nagaland colleges and departments.
@@ -376,16 +387,23 @@ function HomeScreen({
 
                 <View style={styles.actions}>
                   <ActionButton
-                    title="Read PDF"
+                    title="View PDF"
                     compact
                     onPress={() => onOpenPaper(paper)}
                     disabled={!paper.fileUrl}
                   />
                   <ActionButton
-                    title="Share / Save"
+                    title="Download"
                     compact
                     secondary
                     onPress={() => onDownloadPaper(paper)}
+                    disabled={!paper.fileUrl}
+                  />
+                  <ActionButton
+                    title="Share"
+                    compact
+                    secondary
+                    onPress={() => onSharePaper(paper)}
                     disabled={!paper.fileUrl}
                   />
                 </View>
@@ -430,6 +448,7 @@ function Stat({ title, value }) {
 
 function BrowseScreen({
   papers, departments, user, favorites, initialDepartment, onFavorite, refresh, clearNotice, compact,
+  onOpenPaper, onDownloadPaper, onSharePaper,
 }) {
   const [search, setSearch] = useState('');
   const [department, setDepartment] = useState(initialDepartment || '');
@@ -494,8 +513,9 @@ function BrowseScreen({
           paper={paper}
           favorite={favorites.includes(paper.id)}
           onFavorite={() => onFavorite(paper.id)}
-          onOpen={() => openPaper(paper, refresh)}
-          onDownload={() => downloadPaper(paper, refresh)}
+          onOpen={() => onOpenPaper(paper)}
+          onDownload={() => onDownloadPaper(paper)}
+          onShare={() => onSharePaper(paper)}
         />
       ))}
       {!filtered.length ? <EmptyState text="No papers match these filters." /> : null}
@@ -573,21 +593,21 @@ function LoginPanel({ onLogin, onRegister, loading }) {
         const document = result.assets[0];
         const extension = document.name.split('.').pop()?.toLowerCase();
         if (!['pdf', 'jpg', 'jpeg', 'png'].includes(extension)) {
-          Alert.alert('Unsupported document', 'Choose a PDF, JPG, or PNG supporting document.');
+          showThemedAlert('Unsupported document', 'Choose a PDF, JPG, or PNG supporting document.');
           return;
         }
         if (document.size !== undefined && document.size <= 0) {
-          Alert.alert('Empty document', 'Choose a supporting document that is not empty.');
+          showThemedAlert('Empty document', 'Choose a supporting document that is not empty.');
           return;
         }
         if (document.size !== undefined && document.size > 20 * 1024 * 1024) {
-          Alert.alert('Document too large', 'The supporting document must be 20 MB or smaller.');
+          showThemedAlert('Document too large', 'The supporting document must be 20 MB or smaller.');
           return;
         }
         setSupportingDocument(document);
       }
     } catch (error) {
-      Alert.alert('Could not open documents', error.message);
+      showThemedAlert('Could not open documents', error.message);
     }
   }
 
@@ -603,9 +623,9 @@ function LoginPanel({ onLogin, onRegister, loading }) {
       const result = await requestPasswordReset(email.trim());
       setResendSeconds(result.resendAfterSeconds || 60);
       setMode('reset');
-      Alert.alert('Check your email', result.message);
+      showThemedAlert('Check your email', result.message);
     } catch (error) {
-      Alert.alert('Could not send reset code', error.message);
+      showThemedAlert('Could not send reset code', error.message);
     } finally {
       setResetBusy(false);
     }
@@ -619,9 +639,9 @@ function LoginPanel({ onLogin, onRegister, loading }) {
       setPassword('');
       setNewPassword('');
       setOtp('');
-      Alert.alert('Password updated', result.message);
+      showThemedAlert('Password updated', result.message);
     } catch (error) {
-      Alert.alert('Could not reset password', error.message);
+      showThemedAlert('Could not reset password', error.message);
     } finally {
       setResetBusy(false);
     }
@@ -679,12 +699,12 @@ function LoginPanel({ onLogin, onRegister, loading }) {
         {isRegistering
           ? accountType === 'institute'
             ? 'Create an institute staff account. Uploading and editing become available after an administrator approves your account.'
-            : 'Create a reader account to browse papers and save favorites.'
+            : 'Create a reader account to browse papers, save favorites, and submit study resources for administrator review.'
           : isRequestingReset || isConfirmingReset
             ? 'Password reset is available for reader, institute, and administrator accounts.'
             : accountType === 'institute'
               ? 'Sign in to check your institute approval status and manage papers when approved.'
-              : 'Sign in to browse papers and manage your saved favorites.'}
+              : 'Sign in to browse papers, manage favorites, and submit notes or assignments for review.'}
       </Text>
       <Pressable
         accessibilityRole="button"
@@ -932,13 +952,13 @@ function InstitutePublishing({ departments, papers, refresh }) {
       });
       if (!result.canceled) setFile(result.assets[0]);
     } catch (error) {
-      Alert.alert('Could not open documents', error.message);
+      showThemedAlert('Could not open documents', error.message);
     }
   }
 
   async function savePaper() {
     if (!subject.trim() || !departmentId || (!editing && !file)) {
-      Alert.alert('Missing information', 'Enter the paper details, choose a department, and select a PDF.');
+      showThemedAlert('Missing information', 'Enter the paper details, choose a department, and select a PDF.');
       return;
     }
     setBusy(true);
@@ -960,9 +980,9 @@ function InstitutePublishing({ departments, papers, refresh }) {
       });
       clearForm();
       refresh();
-      Alert.alert('Saved', editing ? 'The paper was updated.' : 'The paper was uploaded.');
+      showThemedAlert('Saved', editing ? 'The paper was updated.' : 'The paper was uploaded.');
     } catch (error) {
-      Alert.alert('Could not save paper', error.message);
+      showThemedAlert('Could not save paper', error.message);
     } finally {
       setBusy(false);
     }
@@ -1038,9 +1058,9 @@ function EditProfileForm({ user, onUpdated, onCancel }) {
       });
       setPassword('');
       onUpdated(updated);
-      Alert.alert('Profile updated', 'Your account details have been saved.');
+      showThemedAlert('Profile updated', 'Your account details have been saved.');
     } catch (error) {
-      Alert.alert('Could not update profile', error.message);
+      showThemedAlert('Could not update profile', error.message);
     } finally {
       setBusy(false);
     }
@@ -1072,7 +1092,7 @@ function EditProfileForm({ user, onUpdated, onCancel }) {
 
 function AccountScreen({
   user, loading, onLogin, onRegister, onLogout, onAccountRefreshed,
-  departments, papers, refresh,
+  departments, papers, resources, refresh,
 }) {
   const [editingProfile, setEditingProfile] = useState(false);
 
@@ -1080,7 +1100,7 @@ function AccountScreen({
     try {
       onAccountRefreshed((await request('/api/auth/me')).user);
     } catch (error) {
-      Alert.alert('Could not refresh account status', error.message);
+      showThemedAlert('Could not refresh account status', error.message);
     }
   }
 
@@ -1136,11 +1156,176 @@ function AccountScreen({
           ) : null}
         </>
       ) : (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Your reading account</Text>
-          <Text style={styles.muted}>Browse papers and tap the star to save your favorites to your account.</Text>
-        </View>
+        <>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Your reading account</Text>
+            <Text style={styles.muted}>Browse papers and share notes, assignments, and other study materials. Reader uploads are private until an administrator approves them.</Text>
+          </View>
+          <StudyResourceForm departments={departments} onSubmitted={refresh} />
+          <View style={styles.rowBetween}>
+            <Text style={styles.sectionTitle}>My resource submissions</Text>
+            <ActionButton title="Refresh" compact secondary onPress={refresh} />
+          </View>
+          {resources.filter((resource) => resource.uploadedBy === user.id).map((resource) => (
+            <View key={resource.id} style={styles.card}>
+              <Text style={styles.cardTitle}>{resource.title}</Text>
+              <Text style={styles.muted}>{resource.resourceType} · {resource.departmentName || 'Department'}</Text>
+              <Text style={styles.badge}>{resource.status}</Text>
+              {resource.status === 'pending' ? <Text style={styles.muted}>Waiting for administrator review. It will be visible in the resource library after approval.</Text> : null}
+              {resource.status === 'rejected' ? <Text style={styles.muted}>This submission was not approved. You can remove it and submit a revised file.</Text> : null}
+              {resource.status !== 'approved' ? (
+                <ActionButton
+                  title="Remove submission"
+                  secondary
+                  onPress={() => showThemedAlert('Remove submission?', 'This permanently removes your unapproved resource.', [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Remove',
+                      style: 'destructive',
+                      onPress: async () => {
+                        try {
+                          await request(`/api/resources/${resource.id}`, { method: 'DELETE' });
+                          refresh();
+                        } catch (error) {
+                          showThemedAlert('Could not remove submission', error.message);
+                        }
+                      },
+                    },
+                  ])}
+                />
+              ) : null}
+            </View>
+          ))}
+          {!resources.some((resource) => resource.uploadedBy === user.id) ? (
+            <EmptyState text="You have not submitted any study resources yet." />
+          ) : null}
+        </>
       )}
+    </ScrollView>
+  );
+}
+
+function StudyResourceForm({ departments, onSubmitted }) {
+  const [title, setTitle] = useState('');
+  const [resourceType, setResourceType] = useState('notes');
+  const [departmentId, setDepartmentId] = useState('');
+  const [subject, setSubject] = useState('');
+  const [semester, setSemester] = useState('');
+  const [academicYear, setAcademicYear] = useState('');
+  const [description, setDescription] = useState('');
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!departmentId && departments.length) setDepartmentId(departments[0].id);
+  }, [departmentId, departments]);
+
+  async function choosePdf() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        copyToCacheDirectory: true,
+      });
+      if (!result.canceled) setFile(result.assets[0]);
+    } catch (error) {
+      showThemedAlert('Could not open documents', error.message);
+    }
+  }
+
+  async function submit() {
+    if (!title.trim() || !departmentId || !file) {
+      showThemedAlert('Missing information', 'Enter a title, choose a department, and select a PDF.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const resource = await uploadStudyResource(file, {
+        title: title.trim(),
+        resourceType,
+        departmentId,
+        subject: subject.trim(),
+        semester,
+        academicYear: academicYear.trim(),
+        description: description.trim(),
+      });
+      setTitle('');
+      setSubject('');
+      setSemester('');
+      setAcademicYear('');
+      setDescription('');
+      setFile(null);
+      onSubmitted();
+      showThemedAlert(
+        'Submitted for review',
+        resource.status === 'approved'
+          ? 'Your resource is published and available in the library.'
+          : 'An administrator must approve your resource before readers can access it.',
+      );
+    } catch (error) {
+      showThemedAlert('Could not submit resource', error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>Share a study resource</Text>
+      <Field label="Title" value={title} onChangeText={setTitle} maxLength={200} />
+      <Text style={styles.label}>Resource type</Text>
+      <View style={styles.picker}>
+          <Picker selectedValue={resourceType} onValueChange={setResourceType}>
+          <Picker.Item label="Notes" value="notes" />
+          <Picker.Item label="Assignments" value="assignments" />
+          <Picker.Item label="Other study material" value="other" />
+        </Picker>
+      </View>
+      <Text style={styles.label}>Department</Text>
+      <View style={styles.picker}>
+          <Picker selectedValue={departmentId} onValueChange={setDepartmentId}>
+          {departments.map((item) => <Picker.Item key={item.id} label={item.name} value={item.id} />)}
+        </Picker>
+      </View>
+      <Field label="Subject (optional)" value={subject} onChangeText={setSubject} maxLength={200} />
+      <Field label="Semester (optional)" value={semester} onChangeText={(value) => setSemester(value.replace(/\D/g, '').slice(0, 2))} keyboardType="number-pad" />
+      <Field label="Academic year (optional)" value={academicYear} onChangeText={setAcademicYear} placeholder="2026 or 2026-27" maxLength={8} />
+      <Field label="Description (optional)" value={description} onChangeText={setDescription} multiline maxLength={2000} />
+      <Text style={styles.muted}>PDF files only, up to the platform upload limit. Reader submissions stay private until approved.</Text>
+      <ActionButton title={file?.name || 'Choose PDF'} secondary onPress={choosePdf} />
+      <ActionButton title={busy ? 'Submitting…' : 'Submit for review'} onPress={submit} disabled={busy || !title.trim() || !departmentId || !file} />
+    </View>
+  );
+}
+
+function ResourcesScreen({ user, resources, onSignIn, onView, onDownload, onShare }) {
+  const approvedResources = resources.filter((resource) => resource.status === 'approved');
+  return (
+    <ScrollView contentContainerStyle={styles.content}>
+      <Text style={styles.screenTitle}>Study resources</Text>
+      <Text style={styles.muted}>Browse notes, assignments, and other study materials approved by administrators.</Text>
+      {!user ? (
+        <View style={styles.card}>
+          <Text style={styles.muted}>Sign in to browse and download approved study resources.</Text>
+          <ActionButton title="Sign in" onPress={onSignIn} />
+        </View>
+      ) : approvedResources.map((resource) => (
+        <View key={resource.id} style={styles.card}>
+          <Text style={styles.cardTitle}>{resource.title}</Text>
+          <Text style={styles.muted}>
+            {resource.resourceType} · {resource.departmentName || 'Department'}
+            {resource.subject ? ` · ${resource.subject}` : ''}
+            {resource.semester ? ` · Semester ${resource.semester}` : ''}
+            {resource.academicYear ? ` · ${resource.academicYear}` : ''}
+          </Text>
+          {resource.description ? <Text style={styles.description}>{resource.description}</Text> : null}
+          <View style={styles.actions}>
+            <ActionButton title="View PDF" compact onPress={() => onView(resource)} />
+            <ActionButton title="Download" compact secondary onPress={() => onDownload(resource)} />
+            <ActionButton title="Share" compact secondary onPress={() => onShare(resource)} />
+          </View>
+        </View>
+      ))}
+      {user && !approvedResources.length ? <EmptyState text="No approved study resources are available yet." /> : null}
     </ScrollView>
   );
 }
@@ -1152,7 +1337,7 @@ function EmptyState({ text }) {
 async function openPaper(paper, refresh) {
   try {
     if (!paper.fileUrl) {
-      Alert.alert('PDF unavailable', 'This paper does not have a PDF attached.');
+      showThemedAlert('PDF unavailable', 'This paper does not have a PDF attached.');
       return;
     }
     await Linking.openURL(paper.fileUrl);
@@ -1162,43 +1347,110 @@ async function openPaper(paper, refresh) {
       .then(() => refresh())
       .catch(() => {});
   } catch (error) {
-    Alert.alert('Could not open paper', error.message);
+    showThemedAlert('Could not open paper', error.message);
+  }
+}
+
+function safePdfBaseName(value) {
+  return (value || 'study-resource')
+    .replace(/\.pdf$/i, '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 90) || 'study-resource';
+}
+
+async function cachePdf(fileUrl, fileName, resource) {
+  if (!FileSystem.cacheDirectory) throw new Error('The device does not have a cache folder available.');
+  const localUri = `${FileSystem.cacheDirectory}${safePdfBaseName(fileName)}-${Date.now()}.pdf`;
+  const result = resource
+    ? await downloadStudyResource(resource, localUri)
+    : await FileSystem.downloadAsync(fileUrl, localUri);
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`The server returned status ${result.status}.`);
+  }
+  return result.uri;
+}
+
+async function savePdfToDevice(fileUrl, fileName, resource) {
+  const cachedUri = await cachePdf(fileUrl, fileName, resource);
+  const name = `${safePdfBaseName(fileName)}-${Date.now()}`;
+  if (Platform.OS === 'android') {
+    const storage = FileSystem.StorageAccessFramework;
+    if (!storage?.requestDirectoryPermissionsAsync) {
+      throw new Error('Choose a download folder is not available on this Android version.');
+    }
+    const initialDownloads = storage.getUriForDirectoryInRoot('Download');
+    const permission = await storage.requestDirectoryPermissionsAsync(initialDownloads);
+    if (!permission.granted) {
+      await FileSystem.deleteAsync(cachedUri, { idempotent: true });
+      return null;
+    }
+    const destination = await storage.createFileAsync(permission.directoryUri, name, 'application/pdf');
+    const contents = await FileSystem.readAsStringAsync(cachedUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    await storage.writeAsStringAsync(destination, contents, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    await FileSystem.deleteAsync(cachedUri, { idempotent: true });
+    return 'the folder you selected';
+  }
+
+  if (!FileSystem.documentDirectory) throw new Error('The device does not have a documents folder available.');
+  const destination = `${FileSystem.documentDirectory}${name}.pdf`;
+  await FileSystem.copyAsync({ from: cachedUri, to: destination });
+  await FileSystem.deleteAsync(cachedUri, { idempotent: true });
+  return 'Campus Notes app storage';
+}
+
+async function viewResource(resource) {
+  try {
+    const uri = await cachePdf(resource.fileUrl, resource.title, resource);
+    const viewUri = Platform.OS === 'android' ? await FileSystem.getContentUriAsync(uri) : uri;
+    await Linking.openURL(viewUri);
+  } catch (error) {
+    showThemedAlert('Could not open PDF', error.message);
+  }
+}
+
+async function sharePdf(fileUrl, fileName, resource) {
+  try {
+    const uri = await cachePdf(fileUrl, fileName, resource);
+    if (!(await Sharing.isAvailableAsync())) throw new Error('Sharing is not available on this device.');
+    await Sharing.shareAsync(uri, {
+      mimeType: 'application/pdf',
+      dialogTitle: `Share ${fileName}`,
+      UTI: 'com.adobe.pdf',
+    });
+  } catch (error) {
+    showThemedAlert('Could not share PDF', error.message);
   }
 }
 
 async function downloadPaper(paper, refresh) {
   try {
     if (!paper.fileUrl) {
-      Alert.alert('PDF unavailable', 'This paper does not have a PDF attached.');
+      showThemedAlert('PDF unavailable', 'This paper does not have a PDF attached.');
       return;
     }
-    if (!FileSystem.documentDirectory) {
-      throw new Error('The device does not have a document folder available.');
-    }
-
-    const safeName = `${paper.subject}-${paper.year}`
-      .replace(/[^A-Za-z0-9._-]/g, '_')
-      .slice(0, 100);
-    const destination = `${FileSystem.documentDirectory}${safeName}-${Date.now()}.pdf`;
-    const download = await FileSystem.downloadAsync(paper.fileUrl, destination);
-    if (download.status < 200 || download.status >= 300) {
-      throw new Error(`The server returned status ${download.status}.`);
-    }
+    const savedLocation = await savePdfToDevice(paper.fileUrl, `${paper.subject}-${paper.year}`);
+    if (!savedLocation) return;
 
     request(`/api/papers/${paper.id}/downloads`, { method: 'POST' })
       .then(() => refresh())
       .catch(() => {});
-    if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(download.uri, {
-        mimeType: 'application/pdf',
-        dialogTitle: `Save ${paper.subject}`,
-        UTI: 'com.adobe.pdf',
-      });
-    } else {
-      Alert.alert('PDF downloaded', 'The PDF was downloaded to the app storage, but sharing is unavailable on this device.');
-    }
+    showThemedAlert('Download complete', `Saved ${paper.subject} to ${savedLocation}.`);
   } catch (error) {
-    Alert.alert('Could not download paper', error.message);
+    showThemedAlert('Could not download paper', error.message);
+  }
+}
+
+async function downloadResource(resource) {
+  try {
+    const savedLocation = await savePdfToDevice(resource.fileUrl, resource.title, resource);
+    if (!savedLocation) return;
+    showThemedAlert('Download complete', `Saved ${resource.title} to ${savedLocation}.`);
+  } catch (error) {
+    showThemedAlert('Could not download resource', error.message);
   }
 }
 
@@ -1208,14 +1460,26 @@ export default function App() {
   const [tab, setTab] = useState('Home');
   const [user, setUser] = useState(null);
   const [papers, setPapers] = useState([]);
+  const [resources, setResources] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [favorites, setFavorites] = useState([]);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState('');
+  const [dialog, setDialog] = useState(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [browseDepartment, setBrowseDepartment] = useState('');
 
   const refresh = useCallback(() => setRefreshVersion((value) => value + 1), []);
+  const showDialog = useCallback((title, message, buttons) => {
+    setDialog({ title, message, buttons: buttons?.length ? buttons : [{ text: 'OK' }] });
+  }, []);
+
+  useEffect(() => {
+    themedAlertDispatcher = showDialog;
+    return () => {
+      if (themedAlertDispatcher === showDialog) themedAlertDispatcher = null;
+    };
+  }, [showDialog]);
 
   useEffect(() => {
     getStoredUser()
@@ -1242,6 +1506,20 @@ export default function App() {
       });
     return () => { active = false; };
   }, [refreshVersion]);
+
+  useEffect(() => {
+    let active = true;
+    if (!user) {
+      setResources([]);
+      return () => { active = false; };
+    }
+    request('/api/resources')
+      .then((items) => { if (active) setResources(items); })
+      .catch((error) => {
+        if (active) setNotice(`Could not load study resources: ${error.message}`);
+      });
+    return () => { active = false; };
+  }, [user, refreshVersion]);
 
   useEffect(() => {
     let active = true;
@@ -1283,7 +1561,9 @@ export default function App() {
         instituteDetails,
       );
       setUser(registeredUser);
-      setNotice('');
+      setNotice(accountType === 'institute'
+        ? 'Your institute account request has been sent to the admin for approval. If approved, you will receive an email confirmation.'
+        : '');
       setTab('Account');
       refresh();
     } catch (error) {
@@ -1294,7 +1574,7 @@ export default function App() {
   }
 
   function handleLogout() {
-    Alert.alert('Sign out?', 'Are you sure you want to sign out?', [
+    showThemedAlert('Sign out?', 'Are you sure you want to sign out?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Sign out',
@@ -1306,7 +1586,7 @@ export default function App() {
           try {
             await signOut();
           } catch (error) {
-            Alert.alert(
+            showThemedAlert(
               'Signed out on this device',
               'The session was removed here, but the server could not be told. Sign in again to refresh it.',
             );
@@ -1337,7 +1617,18 @@ export default function App() {
   }
 
   let screen;
-  if (tab === 'AI Preparation') {
+  if (tab === 'Resources') {
+    screen = (
+      <ResourcesScreen
+        user={user}
+        resources={resources}
+        onSignIn={() => setTab('Account')}
+        onView={viewResource}
+        onDownload={downloadResource}
+        onShare={(resource) => sharePdf(resource.fileUrl, resource.title, resource)}
+      />
+    );
+  } else if (tab === 'AI Preparation') {
     screen = (
       <AIPreparationScreen
         user={user}
@@ -1359,6 +1650,7 @@ export default function App() {
         }}
         onOpenPaper={(paper) => openPaper(paper, refresh)}
         onDownloadPaper={(paper) => downloadPaper(paper, refresh)}
+        onSharePaper={(paper) => sharePdf(paper.fileUrl, `${paper.subject}-${paper.year}`)}
         onAIPreparation={() => setTab('AI Preparation')}
         compact={compact}
       />
@@ -1372,6 +1664,9 @@ export default function App() {
         favorites={favorites}
         initialDepartment={browseDepartment}
         onFavorite={toggleFavorite}
+        onOpenPaper={(paper) => openPaper(paper, refresh)}
+        onDownloadPaper={(paper) => downloadPaper(paper, refresh)}
+        onSharePaper={(paper) => sharePdf(paper.fileUrl, `${paper.subject}-${paper.year}`)}
         refresh={refresh}
         clearNotice={() => setNotice('')}
         compact={compact}
@@ -1399,6 +1694,7 @@ export default function App() {
         onAccountRefreshed={setUser}
         departments={departments}
         papers={papers}
+        resources={resources}
         refresh={refresh}
       />
     );
@@ -1421,7 +1717,7 @@ export default function App() {
         </View>
         <View style={styles.body}>{screen}</View>
         <View style={styles.tabs}>
-          {['Home', 'Browse', 'Departments', 'Account'].map((item) => (
+          {['Home', 'Browse', 'Resources', 'Departments', 'Account'].map((item) => (
             <Pressable key={item} style={styles.tab} onPress={() => setTab(item)} accessibilityRole="tab" accessibilityState={{ selected: tab === item }}>
               <Text numberOfLines={1} style={[styles.tabText, compact && styles.tabTextCompact, tab === item && styles.activeTabText]}>{item}</Text>
               {tab === item ? <View style={styles.activeTabIndicator} /> : null}
@@ -1429,6 +1725,41 @@ export default function App() {
           ))}
         </View>
       </SafeAreaView>
+      <Modal
+        visible={Boolean(dialog)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDialog(null)}
+      >
+        <View style={styles.dialogBackdrop}>
+          <View style={styles.dialogCard} accessibilityRole="alert">
+            <Text style={styles.dialogTitle}>{dialog?.title}</Text>
+            {dialog?.message ? <Text style={styles.dialogMessage}>{dialog.message}</Text> : null}
+            <View style={styles.dialogActions}>
+              {(dialog?.buttons || []).map((button, index) => (
+                <Pressable
+                  key={`${button.text}-${index}`}
+                  accessibilityRole="button"
+                  style={[
+                    styles.dialogButton,
+                    button.style === 'cancel' && styles.dialogCancelButton,
+                    button.style === 'destructive' && styles.dialogDestructiveButton,
+                  ]}
+                  onPress={() => {
+                    setDialog(null);
+                    button.onPress?.();
+                  }}
+                >
+                  <Text style={[
+                    styles.dialogButtonText,
+                    button.style === 'cancel' && styles.dialogCancelText,
+                  ]}>{button.text}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaProvider>
   );
 }
@@ -1483,37 +1814,6 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     gap: 14,
   },
-  ambientOrbTopRight: {
-    position: 'absolute',
-    top: -40,
-    right: -50,
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    backgroundColor: COLORS.forestGreen,
-    opacity: 0.35,
-  },
-  ambientOrbTopLeft: {
-    position: 'absolute',
-    top: 140,
-    left: -70,
-    width: 240,
-    height: 240,
-    borderRadius: 120,
-    backgroundColor: COLORS.teal,
-    opacity: 0.28,
-  },
-  ambientOrbCenter: {
-    position: 'absolute',
-    top: 480,
-    right: -40,
-    width: 220,
-    height: 220,
-    borderRadius: 110,
-    backgroundColor: COLORS.mintGreen,
-    opacity: 0.12,
-  },
-
   // Welcome Hero Glass Card
   heroGlass: {
     backgroundColor: COLORS.glassBackground,
@@ -1753,6 +2053,7 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
   buttonText: { color: COLORS.white, fontWeight: '700', fontSize: 15 },
+  buttonPressed: { opacity: 0.72, transform: [{ scale: 0.95 }] },
   secondaryButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
@@ -1811,6 +2112,38 @@ const styles = StyleSheet.create({
   },
   noticeText: { color: COLORS.offWhite },
   noticeDismiss: { color: COLORS.mintGreen, fontWeight: '700' },
+  dialogBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(4, 15, 24, 0.72)',
+  },
+  dialogCard: {
+    width: '100%',
+    maxWidth: 420,
+    padding: 20,
+    gap: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    backgroundColor: COLORS.cardSurface,
+  },
+  dialogTitle: { color: COLORS.white, fontSize: 18, fontWeight: '800' },
+  dialogMessage: { color: COLORS.coolGrey, fontSize: 14, lineHeight: 21 },
+  dialogActions: { flexDirection: 'row', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, marginTop: 4 },
+  dialogButton: {
+    minHeight: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 15,
+    borderRadius: 10,
+    backgroundColor: COLORS.forestGreen,
+  },
+  dialogCancelButton: { backgroundColor: COLORS.glassInput, borderWidth: 1, borderColor: COLORS.glassBorder },
+  dialogDestructiveButton: { backgroundColor: COLORS.red },
+  dialogButtonText: { color: COLORS.white, fontWeight: '700' },
+  dialogCancelText: { color: COLORS.white },
 
   // Bottom Tab Navigation
   tabs: {

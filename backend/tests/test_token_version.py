@@ -146,8 +146,7 @@ def test_password_reset_invalidates_old_tokens_and_allows_new_login(
 def test_put_password_change_invalidates_old_token(account_store):
     db = FakeDatabase()
     account = account_store["user-1"]
-    account["role"] = "dept_admin"
-    account["department_id"] = "department-1"
+    account["role"] = "super_admin"
     old_token = create_access_token(account["id"], account["token_version"])
     assert_token_authenticates(account, old_token)
 

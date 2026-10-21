@@ -18,6 +18,7 @@ dist/
 
 # Uploaded and private documents
 backend/uploads/
+backend/resource_uploads/
 backend/institute_documents/
 uploads/
 institute_documents/

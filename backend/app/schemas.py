@@ -130,7 +130,7 @@ class UserCreate(BaseModel):
     password: Password
     name: str = Field(min_length=1, max_length=160)
     username: str | None = Field(default=None, max_length=80)
-    role: str = "dept_admin"
+    role: Literal["super_admin"] = "super_admin"
     department_id: str | None = None
 
 
@@ -148,6 +148,5 @@ class InstituteApprovalUpdate(BaseModel):
     approval_status: Literal["approved", "rejected"]
 
 
-class ActivityCreate(BaseModel):
-    type: str = Field(min_length=1, max_length=80)
-    message: str = Field(min_length=1, max_length=500)
+class ResourceReviewUpdate(BaseModel):
+    status: Literal["approved", "rejected"]

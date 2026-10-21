@@ -47,31 +47,47 @@ folders are left unchanged.
    pip install -r requirements-dev.txt
    ```
 
-   The API listens on `0.0.0.0:8000`. Uploaded PDFs are stored in
-   `backend/uploads` and served from `/uploads`. `UPLOAD_DIR` is resolved
-   relative to the `backend` folder, so the API behaves the same whether it is
-   started from the repository root or from `backend`.
+   The API listens on `0.0.0.0:8000`. Question-paper PDFs are stored in
+   `backend/uploads` and served from `/uploads`. Reader study-resource PDFs are
+   stored privately in `backend/resource_uploads` by default;
+   `RESOURCE_UPLOAD_DIR` can override that location but must remain outside the
+   public `UPLOAD_DIR`. Relative storage paths are resolved against the
+   `backend` folder.
    Production database users need only normal application data permissions
    unless schema setup is explicitly enabled. Set `SCHEMA_AUTO_MIGRATE=true`
    only when startup is authorized to create the database and apply additive
    schema changes. Neither schema setup nor migrations drop tables or columns.
    Open `http://localhost:8000/admin/` for the separate administrator
-   dashboard. System and department administrators sign in there; the mobile
-   app is for reader accounts and favorites.
+   dashboard. Only system administrators sign in there; the mobile app is for
+   reader and institute accounts. Apply the updated `backend/schema.sql` to an
+   existing database (or opt in to `SCHEMA_AUTO_MIGRATE=true`) before starting
+   this version; it adds the study-resources table without deleting existing
+   data.
    Readers can create accounts from the mobile app. Administrator accounts
    are provisioned only through `ADMIN_EMAIL`/`ADMIN_PASSWORD` or by an
    authenticated super admin; public registration never grants admin access.
+   On startup, legacy department administrator accounts are converted to
+   reader accounts, their department assignments are cleared, and their
+   existing sessions are revoked.
+   Readers can submit PDF notes, assignments, and other study materials from
+   the mobile app. These files remain private until a system administrator
+   approves each submission in the admin dashboard. Administrator uploads are
+   published immediately. Approved resources are served through an authenticated
+   API and stored outside the public question-paper upload directory.
    Institute staff registration collects a phone number, designation,
    college/university name, and a required PDF, JPG, or PNG affiliation document
    (up to `MAX_UPLOAD_MB`). Supporting documents are stored privately and can
    only be downloaded by a system administrator from the Institute approvals
    section. Institute accounts remain read-only until approved; approved
    institute accounts can upload and edit question papers in the mobile app,
-   but only administrators can delete them.
+   but only administrators can delete them. When an administrator approves an
+   institute account, Campus-notes sends an approval confirmation to its
+   registered email address using the SMTP settings below.
 4. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
    `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME`, and `SMTP_USE_TLS` in `backend/.env`
    to enable password recovery for reader, institute, and administrator
-   accounts. Use credentials from your mail provider; do not commit them.
+   accounts and approval confirmations for institute staff. Use credentials
+   from your mail provider; do not commit them.
    For Gmail, set `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`,
    `SMTP_USE_TLS=true`, and use the sending Gmail address for both
    `SMTP_USERNAME` and `SMTP_FROM_EMAIL`. `SMTP_PASSWORD` must be a Google
@@ -89,9 +105,10 @@ folders are left unchanged.
 
 Question-paper PDFs are intentionally public: `/uploads` is served without
 authentication so that a shared paper link works, and institute affiliation
-documents are kept in a separate directory that is never served statically.
-Because of that, **only material that may be public belongs in
-`backend/uploads`**. Files that are no longer referenced by a paper are
+documents and unapproved reader resources are kept outside that public static
+directory. Approved reader resources are delivered through an authenticated
+endpoint. Because of that, **only material that may be public belongs in
+`backend/uploads`**. Paper files that are no longer referenced by a paper are
 quarantined with:
 
 ```powershell
@@ -129,7 +146,7 @@ cd backend
 python -m scripts.backup_database
 
 # 2. Archive the PDFs and private documents
-tar -czf ..\backup\documents_$(Get-Date -Format yyyyMMdd_HHmmss).tar.gz uploads institute_documents
+tar -czf ..\backup\documents_$(Get-Date -Format yyyyMMdd_HHmmss).tar.gz uploads institute_documents resource_uploads
 
 # 3. Prove the dump restores, by replaying it into campus_notes_verify
 python -m scripts.verify_backup

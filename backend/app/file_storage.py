@@ -1,8 +1,9 @@
-"""Storage helpers for uploaded question papers and private documents.
+"""Storage helpers for public question papers and private documents.
 
 Paper PDFs live in ``UPLOAD_DIR`` and are addressed by the public URL
 ``/uploads/<filename>``. Institute affiliation documents live in a sibling
-directory and are never served statically.
+directory and are never served statically. Moderated reader resources are
+stored separately by the API and are not served from this directory.
 
 The important rule this module enforces: **a file is only removed after the
 database transaction that dropped its row has committed.** Removing first

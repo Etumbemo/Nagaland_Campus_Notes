@@ -1,8 +1,8 @@
-CREATE DATABASE IF NOT EXISTS campus_notes
+CREATE DATABASE IF NOT EXISTS nagaland_campus_notes
     CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
-USE campus_notes;
+USE nagaland_campus_notes;
 
 CREATE TABLE IF NOT EXISTS departments (
     id CHAR(36) PRIMARY KEY,
@@ -68,6 +68,35 @@ CREATE TABLE IF NOT EXISTS papers (
     CONSTRAINT fk_papers_department FOREIGN KEY (department_id)
         REFERENCES departments(id) ON DELETE CASCADE,
     CONSTRAINT fk_papers_uploader FOREIGN KEY (uploaded_by)
+        REFERENCES profiles(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS resources (
+    id CHAR(36) PRIMARY KEY,
+    title VARCHAR(200) NOT NULL,
+    resource_type VARCHAR(32) NOT NULL,
+    department_id CHAR(36) NULL,
+    subject VARCHAR(200) NULL,
+    semester INT NULL,
+    academic_year VARCHAR(8) NULL,
+    description TEXT NULL,
+    file_path VARCHAR(255) NOT NULL,
+    original_file_name VARCHAR(255) NOT NULL,
+    uploaded_by CHAR(36) NULL,
+    uploaded_by_name VARCHAR(160) NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    reviewed_by CHAR(36) NULL,
+    reviewed_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX ix_resources_status_created (status, created_at),
+    INDEX ix_resources_uploader (uploaded_by),
+    INDEX ix_resources_department (department_id),
+    CONSTRAINT fk_resources_department FOREIGN KEY (department_id)
+        REFERENCES departments(id) ON DELETE SET NULL,
+    CONSTRAINT fk_resources_uploader FOREIGN KEY (uploaded_by)
+        REFERENCES profiles(id) ON DELETE SET NULL,
+    CONSTRAINT fk_resources_reviewer FOREIGN KEY (reviewed_by)
         REFERENCES profiles(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

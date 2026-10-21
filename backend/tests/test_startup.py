@@ -17,6 +17,7 @@ class FakeCursor:
     def __init__(self, state: dict[str, Any]) -> None:
         self.state = state
         self.result: dict[str, Any] | None = None
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -26,7 +27,15 @@ class FakeCursor:
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         sql = sql.strip()
-        if sql.startswith("SELECT id FROM departments"):
+        self.rowcount = 0
+        if sql.startswith("UPDATE profiles"):
+            for profile in self.state.get("profiles", []):
+                if profile.get("role") == "dept_admin":
+                    profile["role"] = "user"
+                    profile["department_id"] = None
+                    profile["token_version"] += 1
+                    self.rowcount += 1
+        elif sql.startswith("SELECT id FROM departments"):
             self.result = self.state["departments"].get(params[0])
         elif sql.startswith("INSERT INTO departments"):
             department_id, name, code = params
@@ -180,6 +189,30 @@ def test_startup_admin_bootstrap_is_skipped_without_environment_values(
 
     assert calls["admin_queries"] == []
     assert connection.closed
+
+
+def test_startup_converts_legacy_department_admins_to_readers_and_revokes_sessions(
+    startup_environment, monkeypatch: pytest.MonkeyPatch
+):
+    state = {
+        "departments": {},
+        "papers": {},
+        "inserts": 0,
+        "profiles": [
+            {"role": "dept_admin", "department_id": "dept-1", "token_version": 2},
+            {"role": "user", "department_id": None, "token_version": 0},
+        ],
+    }
+    connection = FakeConnection(state)
+    configure_startup(monkeypatch, lambda: connection)
+
+    main.initialize_database()
+
+    assert state["profiles"] == [
+        {"role": "user", "department_id": None, "token_version": 3},
+        {"role": "user", "department_id": None, "token_version": 0},
+    ]
+    assert connection.commits == 1
 
 
 @pytest.mark.parametrize(

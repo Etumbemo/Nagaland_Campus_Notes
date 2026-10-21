@@ -123,6 +123,7 @@ def verify_schema(connection) -> None:
         "papers",
         "password_reset_otps",
         "profiles",
+        "resources",
     }
     try:
         with connection.cursor() as cursor:
