@@ -98,7 +98,7 @@
       <nav id="tabs" aria-label="Admin sections">
         <button data-section="papers" class="active">Question papers</button>
         <button data-section="departments" class="super-only">Departments</button>
-        <button data-section="approvals">Institutes</button>
+        <button data-section="approvals" class="super-only">Institutes</button>
         <button data-section="activity">Recent activity</button>
       </nav>
 
@@ -114,7 +114,7 @@
             <label>Exam type<select name="exam_type" required>
               <option>Weekly Test 1</option><option>Weekly Test 2</option><option>CIA 1</option><option>CIA 2</option><option>End Semester</option>
             </select></label>
-            <label>Year<input name="year" value="2026" minlength="4" maxlength="8" required></label>
+            <label>Year<input name="year" value="2026" pattern="[0-9]{4}" title="Four-digit year, for example 2024" maxlength="4" required></label>
             <label class="wide">Description<textarea name="description" maxlength="2000"></textarea></label>
             <button class="wide" type="submit">Upload paper</button>
           </form>
@@ -159,7 +159,7 @@
       <label>Exam type<select name="exam_type" required>
         <option>Weekly Test 1</option><option>Weekly Test 2</option><option>CIA 1</option><option>CIA 2</option><option>End Semester</option>
       </select></label>
-      <label>Year<input name="year" minlength="4" maxlength="8" required></label>
+      <label>Year<input name="year" pattern="[0-9]{4}" title="Four-digit year, for example 2024" maxlength="4" required></label>
       <label class="wide">Description<textarea name="description" maxlength="2000"></textarea></label>
       <label class="wide">Replace PDF (optional)<input name="file" type="file" accept="application/pdf,.pdf"></label>
       <div class="wide actions"><button type="submit">Save changes</button><button id="cancel-edit" class="secondary" type="button">Cancel</button></div>
@@ -551,8 +551,18 @@
           await api(`/api/departments/${encodeURIComponent(department.id)}`, { method: 'PUT', body: JSON.stringify({ name: name.trim(), code: code.trim() }) });
           await loadDashboard();
           message('Department updated.', false);
-        } else if (remove && confirm('Delete this department and its papers?')) {
-          await api(`/api/departments/${encodeURIComponent(remove.dataset.deleteDepartment)}`, { method: 'DELETE' });
+        } else if (remove && confirm('Delete this department? Its question papers, the students\u2019 favourites for those papers, and its department administrator accounts will also be deleted. This cannot be undone.')) {
+          try {
+            await api(`/api/departments/${encodeURIComponent(remove.dataset.deleteDepartment)}`, { method: 'DELETE' });
+          } catch (deleteError) {
+            // The API refuses while papers still exist and reports exactly what
+            // would be lost; ask for explicit confirmation and retry once.
+            if (deleteError.message.includes('force=true') && confirm(`${deleteError.message}\n\nDelete anyway?`)) {
+              await api(`/api/departments/${encodeURIComponent(remove.dataset.deleteDepartment)}?force=true`, { method: 'DELETE' });
+            } else {
+              throw deleteError;
+            }
+          }
           await loadDashboard();
           message('Department deleted.', false);
         }

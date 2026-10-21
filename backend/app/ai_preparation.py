@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import re
+import threading
+from collections import OrderedDict
 from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -130,7 +132,50 @@ def select_papers_for_year_range(
     return selected, missing
 
 
+# Extracted page text is cached so repeated generations over the same papers do
+# not re-parse (and re-OCR) the same bytes. Bounded so memory stays predictable.
+_EXTRACTION_CACHE: "OrderedDict[tuple[str, int, int], tuple[str, ...]]" = OrderedDict()
+_EXTRACTION_CACHE_LIMIT = 32
+_EXTRACTION_LOCK = threading.Lock()
+
+
+def _cache_key(file_path: Path) -> tuple[str, int, int] | None:
+    try:
+        stat = file_path.stat()
+    except OSError:
+        return None
+    return (str(file_path.resolve()), int(stat.st_mtime), int(stat.st_size))
+
+
+def clear_extraction_cache() -> None:
+    """Drop cached page text. Used by tests and after a paper is replaced."""
+    with _EXTRACTION_LOCK:
+        _EXTRACTION_CACHE.clear()
+
+
 def extract_pdf_pages(file_path: Path) -> list[str]:
+    """Return the text of each page, using a small mtime/size-keyed cache."""
+    path = Path(file_path)
+    key = _cache_key(path)
+    if key is not None:
+        with _EXTRACTION_LOCK:
+            cached = _EXTRACTION_CACHE.get(key)
+            if cached is not None:
+                _EXTRACTION_CACHE.move_to_end(key)
+                return list(cached)
+
+    pages = _extract_pdf_pages_uncached(path)
+
+    if key is not None:
+        with _EXTRACTION_LOCK:
+            _EXTRACTION_CACHE[key] = tuple(pages)
+            _EXTRACTION_CACHE.move_to_end(key)
+            while len(_EXTRACTION_CACHE) > _EXTRACTION_CACHE_LIMIT:
+                _EXTRACTION_CACHE.popitem(last=False)
+    return pages
+
+
+def _extract_pdf_pages_uncached(file_path: Path) -> list[str]:
     try:
         import fitz
     except ImportError as error:
@@ -311,6 +356,26 @@ def _hosted_provider_configured() -> bool:
     )
 
 
+def ai_provider_status() -> dict:
+    """Non-secret provider diagnostics for /api/health.
+
+    Never include the hosted API key, not even a masked fragment: the presence
+    of a key is all an operator needs, and a prefix is a secret too.
+    """
+    model = os.getenv("OLLAMA_MODEL", "llama3.2:3b").strip()
+    try:
+        timeout: float | None = float(os.getenv("AI_PROVIDER_TIMEOUT_SECONDS", "45"))
+    except ValueError:
+        timeout = None
+    return {
+        "local_url": os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
+        "local_model": model or None,
+        "local_configured": bool(model),
+        "hosted_configured": _hosted_provider_configured(),
+        "timeout_seconds": timeout,
+    }
+
+
 def _call_hosted(prompt: str) -> str:
     base_url = os.getenv("HOSTED_AI_BASE_URL", "").strip().rstrip("/")
     model = os.getenv("HOSTED_AI_MODEL", "").strip()
@@ -378,6 +443,50 @@ def parse_ai_questions(response_text: str) -> list[dict]:
 
 def normalize_question_text(value: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+# Words that carry no topic information; including them would let almost any
+# question look "grounded" against almost any page.
+_GROUNDING_STOPWORDS = frozenset(
+    "a an and answer are as at be by choose define describe discuss do does explain "
+    "for from give how if in is it its of on or question short state the their then "
+    "there these this to was what when where which who why with write".split()
+)
+GROUNDING_MIN_OVERLAP = 0.55
+
+
+def _topic_tokens(value: str) -> set[str]:
+    tokens = set(re.findall(r"[a-z0-9]+", value.casefold()))
+    return tokens - _GROUNDING_STOPWORDS
+
+
+def question_is_grounded(
+    question_text: str,
+    sources: list[dict],
+    pages_by_paper: dict[str, list[str]],
+) -> bool:
+    """Check that a question's wording actually appears on a page it cites.
+
+    Structural validation only proves the cited paper and page exist. Without
+    this check a model can cite a real page and still invent the question on it.
+    """
+    required = _topic_tokens(question_text)
+    if not required:
+        return False
+    for source in sources:
+        page = source.get("page")
+        paper_id = str(source.get("paper_id"))
+        if not isinstance(page, int) or isinstance(page, bool):
+            continue
+        pages = pages_by_paper.get(paper_id) or []
+        if not 1 <= page <= len(pages):
+            continue
+        available = _topic_tokens(pages[page - 1])
+        if not available:
+            continue
+        if len(required & available) / len(required) >= GROUNDING_MIN_OVERLAP:
+            return True
+    return False
 
 
 def deduplicate_questions(questions: list[dict]) -> list[dict]:
@@ -484,6 +593,14 @@ def validate_and_enrich_questions(
             "origin": origin,
             "sources": sources,
         }
+        if origin == "past_paper":
+            # Only claim "this appeared in the paper" when the wording is really
+            # on the cited page; otherwise label it honestly as generated.
+            if question_is_grounded(question_text, sources, pages_by_paper):
+                item["grounding"] = "verified"
+            else:
+                item["origin"] = "ai_generated"
+                item["grounding"] = "unverified"
         if feature == "important_questions":
             priority = str(raw.get("priority") or "").lower()
             if priority not in {"high", "medium", "low"}:

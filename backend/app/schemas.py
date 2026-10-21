@@ -95,7 +95,9 @@ class PaperCreate(BaseModel):
     department_id: str
     semester: int = Field(ge=1, le=12)
     exam_type: str = Field(min_length=1, max_length=80)
-    year: str = Field(min_length=4, max_length=8)
+    # The AI pipeline only understands a bare four-digit year (parse_exam_year).
+    # Accepting "2024-25" here stored a paper that no AI query could ever select.
+    year: str = Field(pattern=r"^\d{4}$")
     description: str | None = None
     file_url: str | None = Field(default=None, max_length=500)
 
@@ -106,7 +108,7 @@ class PaperUpdate(BaseModel):
     department_id: str | None = None
     semester: int | None = Field(default=None, ge=1, le=12)
     exam_type: str | None = Field(default=None, min_length=1, max_length=80)
-    year: str | None = Field(default=None, min_length=4, max_length=8)
+    year: str | None = Field(default=None, pattern=r"^\d{4}$")
     description: str | None = None
     file_url: str | None = Field(default=None, max_length=500)
 

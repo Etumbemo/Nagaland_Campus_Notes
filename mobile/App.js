@@ -987,7 +987,7 @@ function InstitutePublishing({ departments, papers, refresh }) {
             {EXAM_TYPES.map((item) => <Picker.Item key={item} label={item} value={item} />)}
           </Picker>
         </View>
-        <Field label="Year" value={year} onChangeText={setYear} keyboardType="number-pad" />
+        <Field label="Year" value={year} onChangeText={(value) => setYear(value.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" maxLength={4} />
         <Field label="Description (optional)" value={description} onChangeText={setDescription} multiline />
         <ActionButton
           title={file?.name || (editing ? 'Replace PDF (optional)' : 'Choose PDF')}
@@ -1155,9 +1155,12 @@ async function openPaper(paper, refresh) {
       Alert.alert('PDF unavailable', 'This paper does not have a PDF attached.');
       return;
     }
-    await request(`/api/papers/${paper.id}/views`, { method: 'POST' });
     await Linking.openURL(paper.fileUrl);
-    refresh();
+    // The view counter is analytics: it must never decide whether a student can
+    // read a paper, so it runs after the PDF opens and never blocks the flow.
+    request(`/api/papers/${paper.id}/views`, { method: 'POST' })
+      .then(() => refresh())
+      .catch(() => {});
   } catch (error) {
     Alert.alert('Could not open paper', error.message);
   }
@@ -1182,8 +1185,9 @@ async function downloadPaper(paper, refresh) {
       throw new Error(`The server returned status ${download.status}.`);
     }
 
-    await request(`/api/papers/${paper.id}/downloads`, { method: 'POST' });
-    refresh();
+    request(`/api/papers/${paper.id}/downloads`, { method: 'POST' })
+      .then(() => refresh())
+      .catch(() => {});
     if (await Sharing.isAvailableAsync()) {
       await Sharing.shareAsync(download.uri, {
         mimeType: 'application/pdf',
@@ -1296,12 +1300,20 @@ export default function App() {
         text: 'Sign out',
         style: 'destructive',
         onPress: async () => {
+          // Signing out must always succeed locally: the stored token is deleted
+          // either way, so leaving the UI signed in would only show a session
+          // that can no longer make any authenticated request.
           try {
             await signOut();
-            setUser(null);
-            setTab('Home');
           } catch (error) {
-            Alert.alert('Could not sign out', error.message);
+            Alert.alert(
+              'Signed out on this device',
+              'The session was removed here, but the server could not be told. Sign in again to refresh it.',
+            );
+          } finally {
+            setUser(null);
+            setFavorites([]);
+            setTab('Home');
           }
         },
       },

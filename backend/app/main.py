@@ -5,6 +5,7 @@ import hmac
 import logging
 import secrets
 import smtplib
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -20,6 +21,7 @@ from pymysql.cursors import DictCursor
 from .ai_preparation import (
     AIProviderError,
     AIUnavailableError,
+    ai_provider_status,
     MAX_IMPORTANT_QUESTIONS,
     MAX_MOCK_QUESTIONS,
     MAX_SOURCE_PAPERS,
@@ -42,7 +44,9 @@ from .database import (
     verify_schema,
 )
 from .dev_seed import seed_demo_data
+from .file_storage import delete_institute_document, delete_uploaded_file
 from .mailer import send_password_reset_otp
+from .rate_limit import SlidingWindowLimiter, client_address
 from .schemas import (
     ActivityCreate,
     AIPreparationGenerateRequest,
@@ -75,14 +79,85 @@ PASSWORD_RESET_COOLDOWN_SECONDS = 60
 PASSWORD_RESET_EXPIRY_MINUTES = 10
 PASSWORD_RESET_MAX_ATTEMPTS = 5
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def _configured_directory(setting: str, default: str) -> Path:
+    """Resolve a configured directory against the backend folder.
+
+    Resolving against the current working directory made the upload location
+    depend on where the process was started from, so starting the API from the
+    repository root silently wrote files to a different place than the
+    /uploads mount served.
+    """
+    configured = Path(os.getenv(setting, default))
+    if not configured.is_absolute():
+        configured = BACKEND_DIR / configured
+    return configured.resolve()
+
+
+def _configured_int(setting: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(setting, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{setting} must be a whole number, got {raw!r}") from error
+    if value < minimum:
+        raise RuntimeError(f"{setting} must be at least {minimum}, got {value}")
+    return value
+
+
+UPLOAD_DIR = _configured_directory("UPLOAD_DIR", "uploads")
 INSTITUTE_DOCUMENT_DIR = (UPLOAD_DIR.parent / "institute_documents").resolve()
-ADMIN_DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "admin"
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
+ADMIN_DASHBOARD_DIR = BACKEND_DIR / "admin"
+MAX_UPLOAD_MB = _configured_int("MAX_UPLOAD_MB", 20)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 INSTITUTE_DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Campus-notes API", version="1.0.0")
+# Throttles. Keyed per client address for anonymous endpoints and per user id
+# for the authenticated AI endpoint, so students sharing one campus NAT are not
+# punished for each other's traffic.
+LOGIN_LIMITER = SlidingWindowLimiter(limit=15, window_seconds=15 * 60)
+REGISTER_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
+PASSWORD_RESET_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
+AI_HOURLY_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
+AI_DAILY_LIMITER = SlidingWindowLimiter(limit=20, window_seconds=24 * 60 * 60)
+
+
+def rate_limit_dependency(limiter: SlidingWindowLimiter, message: str):
+    """Build a FastAPI dependency that throttles a route per client address."""
+
+    def dependency(request: Request) -> None:
+        result = limiter.check(client_address(request))
+        if not result.allowed:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                message,
+                headers={"Retry-After": str(result.retry_after)},
+            )
+
+    return dependency
+
+
+login_limit = rate_limit_dependency(
+    LOGIN_LIMITER, "Too many sign-in attempts. Wait a few minutes and try again."
+)
+register_limit = rate_limit_dependency(
+    REGISTER_LIMITER, "Too many account creations from this device. Try again later."
+)
+password_reset_limit = rate_limit_dependency(
+    PASSWORD_RESET_LIMITER, "Too many reset requests. Try again later."
+)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run the startup checks and surface them through FastAPI's lifespan API."""
+    initialize_database()
+    yield
+
+
+app = FastAPI(title="Campus-notes API", version="1.0.0", lifespan=lifespan)
 origins = [
     origin.strip()
     for origin in os.getenv("CORS_ORIGINS", "http://localhost:8081").split(",")
@@ -204,10 +279,22 @@ def require_roles(user: dict, roles: set[str]) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient permissions")
 
 
-def can_manage_department(user: dict, department_id: str) -> None:
+def can_manage_department(user: dict, department_id: str, action: str = "write") -> None:
+    """Authorise a paper write/delete against a department.
+
+    Department administrators are scoped to their own department. Institute
+    accounts are approved institution staff and may publish and correct papers
+    across departments, but deleting is reserved for administrators so that one
+    college cannot remove another college's material.
+    """
     require_roles(user, {"dept_admin", "super_admin", "institute"})
     if user["role"] == "dept_admin" and user.get("department_id") != department_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot manage another department")
+    if user["role"] == "institute" and action == "delete":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Institute accounts cannot delete question papers",
+        )
 
 
 def commit_or_conflict(db) -> None:
@@ -306,17 +393,17 @@ def initialize_database() -> None:
         connection.close()
 
 
-@app.on_event("startup")
-def startup() -> None:
-    initialize_database()
-
-
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": app.version}
+    """Liveness plus non-secret AI provider diagnostics."""
+    return {"status": "ok", "version": app.version, "ai": ai_provider_status()}
 
 
-@app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/auth/register",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(register_limit)],
+)
 def register(payload: RegisterRequest, db=Depends(get_db)):
     name = payload.name.strip()
     if not name:
@@ -454,7 +541,7 @@ async def register_institute(
     }
 
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", dependencies=[Depends(login_limit)])
 def login(payload: LoginRequest, db=Depends(get_db)):
     user = query_one(
         db,
@@ -481,7 +568,10 @@ def login(payload: LoginRequest, db=Depends(get_db)):
     }
 
 
-@app.post("/api/auth/password-reset/request")
+@app.post(
+    "/api/auth/password-reset/request",
+    dependencies=[Depends(password_reset_limit)],
+)
 def request_password_reset(payload: PasswordResetRequest, db=Depends(get_db)):
     email = payload.email.lower()
     account = query_one(
@@ -544,7 +634,11 @@ def request_password_reset(payload: PasswordResetRequest, db=Depends(get_db)):
     if account and otp:
         try:
             send_password_reset_otp(email, account["name"], otp)
-        except (OSError, RuntimeError, smtplib.SMTPException, ValueError) as error:
+        except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
+            # Returning a different status here would tell an attacker whether
+            # the address has an account (a signup/enumeration oracle). Keep the
+            # response identical for every address, and make the failure visible
+            # in the server log instead.
             logger.exception("Unable to send password reset email")
             execute(
                 db,
@@ -556,10 +650,6 @@ def request_password_reset(payload: PasswordResetRequest, db=Depends(get_db)):
                 (email,),
             )
             db.commit()
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "Password reset email is temporarily unavailable. Please try again later.",
-            ) from error
 
     return {
         "message": "If an account exists for this email, a reset code has been sent.",
@@ -701,16 +791,62 @@ def update_department(
 @app.delete("/api/departments/{department_id}")
 def delete_department(
     department_id: str,
+    force: bool = Query(default=False),
     db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
+    """Delete a department and everything that cascades from it.
+
+    The foreign keys cascade to papers and favourites, and department
+    administrators are removed explicitly. Because that is a lot of data to lose
+    behind a single click, the caller must confirm the exact impact first and
+    pass force=true.
+    """
     require_roles(user, {"super_admin"})
     if not query_one(db, "SELECT id FROM departments WHERE id = %s", (department_id,)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Department not found")
+
+    impact = query_one(
+        db,
+        """
+        SELECT
+            (SELECT COUNT(*) FROM papers WHERE department_id = %s) AS papers,
+            (SELECT COUNT(*) FROM favorites AS f
+                JOIN papers AS p ON p.id = f.paper_id
+                WHERE p.department_id = %s) AS favorites,
+            (SELECT COUNT(*) FROM profiles
+                WHERE department_id = %s AND role = 'dept_admin') AS department_admins
+        """,
+        (department_id, department_id, department_id),
+    ) or {"papers": 0, "favorites": 0, "department_admins": 0}
+
+    file_rows = query_all(db, "SELECT file_url FROM papers WHERE department_id = %s", (department_id,))
+
+    if impact["papers"] and not force:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            (
+                f"This department still has {impact['papers']} question paper(s), which would also "
+                f"delete {impact['favorites']} favourite(s) and {impact['department_admins']} department "
+                "administrator account(s). Re-send with force=true to proceed."
+            ),
+        )
+
     execute(db, "DELETE FROM profiles WHERE department_id = %s AND role = 'dept_admin'", (department_id,))
     execute(db, "DELETE FROM departments WHERE id = %s", (department_id,))
     db.commit()
-    return {"message": "Department deleted"}
+
+    for row in file_rows:
+        delete_uploaded_file(row.get("file_url"), UPLOAD_DIR)
+
+    return {
+        "message": "Department deleted",
+        "deleted": {
+            "papers": impact["papers"],
+            "favorites": impact["favorites"],
+            "department_admins": impact["department_admins"],
+        },
+    }
 
 
 @app.get("/api/papers")
@@ -787,6 +923,21 @@ def generate_ai_preparation(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "The start year must be before or equal to the end year.",
         )
+
+    # Charge the quota only after the cheap validation above, so a typo does not
+    # burn a student's allowance, but before the expensive PDF/OCR work below.
+    quota_key = str(user.get("id") or user.get("email") or "unknown-user")
+    for limiter, message in (
+        (AI_HOURLY_LIMITER, "You have reached the hourly AI generation limit. Try again later."),
+        (AI_DAILY_LIMITER, "You have reached the daily AI generation limit. Try again tomorrow."),
+    ):
+        result = limiter.check(quota_key)
+        if not result.allowed:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                message,
+                headers={"Retry-After": str(result.retry_after)},
+            )
 
     rows = query_all(
         db,
@@ -970,6 +1121,7 @@ def update_paper(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Paper not found")
     changes = payload.model_dump(exclude_unset=True)
     can_manage_department(user, changes.get("department_id") or paper["department_id"])
+    previous_file_url = paper.get("file_url")
     if "department_id" in changes and not query_one(
         db, "SELECT id FROM departments WHERE id = %s", (changes["department_id"],)
     ):
@@ -979,6 +1131,8 @@ def update_paper(
         params = [*changes.values(), paper_id]
         execute(db, f"UPDATE papers SET {', '.join(updates)} WHERE id = %s", tuple(params))
         commit_or_conflict(db)
+        if "file_url" in changes and previous_file_url != changes["file_url"]:
+            delete_uploaded_file(previous_file_url, UPLOAD_DIR)
     return paper_json(query_one(db, PAPER_SELECT + " WHERE p.id = %s", (paper_id,)))
 
 
@@ -988,12 +1142,15 @@ def delete_paper(
     db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
-    paper = query_one(db, "SELECT department_id FROM papers WHERE id = %s", (paper_id,))
+    paper = query_one(db, "SELECT department_id, file_url FROM papers WHERE id = %s", (paper_id,))
     if not paper:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Paper not found")
-    can_manage_department(user, paper["department_id"])
+    can_manage_department(user, paper["department_id"], action="delete")
     execute(db, "DELETE FROM papers WHERE id = %s", (paper_id,))
     db.commit()
+    # Only after the row is committed: deleting first would destroy the PDF even
+    # if the database rejected the delete.
+    delete_uploaded_file(paper.get("file_url"), UPLOAD_DIR)
     return {"message": "Paper deleted"}
 
 
@@ -1216,13 +1373,19 @@ def delete_user(
     user: dict = Depends(require_user),
 ):
     require_roles(user, {"super_admin"})
-    target = query_one(db, "SELECT role FROM profiles WHERE id = %s", (user_id,))
+    target = query_one(
+        db,
+        "SELECT role, institute_document_path FROM profiles WHERE id = %s",
+        (user_id,),
+    )
     if not target:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target["role"] == "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot delete a super admin")
     execute(db, "DELETE FROM profiles WHERE id = %s", (user_id,))
     db.commit()
+    # The private affiliation document must not outlive the account.
+    delete_institute_document(target.get("institute_document_path"), INSTITUTE_DOCUMENT_DIR)
     return {"message": "User deleted"}
 
 
@@ -1296,7 +1459,14 @@ def get_stats(db=Depends(get_db), user: dict = Depends(require_user)):
     else:
         departments = query_all(db, "SELECT id, name, code FROM departments ORDER BY name")
     total_departments = len(departments)
-    admin_count = query_one(db, "SELECT COUNT(*) AS count FROM profiles WHERE role = 'dept_admin'")["count"]
+    if user["role"] == "dept_admin":
+        admin_count = query_one(
+            db,
+            "SELECT COUNT(*) AS count FROM profiles WHERE role = 'dept_admin' AND department_id = %s",
+            (user.get("department_id"),),
+        )["count"]
+    else:
+        admin_count = query_one(db, "SELECT COUNT(*) AS count FROM profiles WHERE role = 'dept_admin'")["count"]
     papers_by_dept = query_all(
         db,
         f"""
@@ -1351,7 +1521,6 @@ def get_stats(db=Depends(get_db), user: dict = Depends(require_user)):
 
 @app.post("/api/uploads", status_code=status.HTTP_201_CREATED)
 async def upload_pdf(
-    request: Request,
     file: UploadFile = File(...),
     user: dict = Depends(require_user),
 ):
@@ -1366,8 +1535,11 @@ async def upload_pdf(
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(file.filename or "paper.pdf").name)
     file_name = f"{uuid4()}_{safe_name}"
     (UPLOAD_DIR / file_name).write_bytes(contents)
+    # A relative URL is stored. Building it from request.base_url baked the
+    # uploader's host name into the database, so every existing paper broke when
+    # the server's LAN IP changed and a spoofed Host header could poison it.
     return {
-        "url": str(request.base_url).rstrip("/") + f"/uploads/{file_name}",
+        "url": f"/uploads/{file_name}",
         "path": file_name,
         "file_name": file.filename,
     }
