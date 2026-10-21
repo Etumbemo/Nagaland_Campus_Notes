@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Campus-notes",
+    "slug": "campus-notes",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "icon": "./notes-logo.png",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.campusnotes.mobile"
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./notes-logo.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#f5f7fb"
+        }
+      ],
+      "expo-sharing"
+    ]
+  }
+}

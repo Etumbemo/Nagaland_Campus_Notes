@@ -1,0 +1,38 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+.venv/
+.venv_old/
+**/.venv/
+**/.venv_old/
+__pycache__/
+*.py[cod]
+
+# Node.js and Expo generated files
+node_modules/
+.expo/
+dist/
+
+# Uploaded and private documents
+backend/uploads/
+backend/institute_documents/
+uploads/
+institute_documents/
+
+# Backups and test caches (never commit data copies or secrets)
+backup/
+__pycache__/
+.pytest_cache/
+
+# Local databases and logs
+*.log
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Local agent metadata
+.freebuff/
