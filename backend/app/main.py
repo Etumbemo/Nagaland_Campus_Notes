@@ -5,19 +5,23 @@ import hmac
 import logging
 import secrets
 import smtplib
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import quote
 from uuid import uuid4
 
 import pymysql
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pymysql.cursors import DictCursor
 from pydantic import EmailStr
+from botocore.exceptions import ClientError
+from starlette.concurrency import run_in_threadpool
 
 from .ai_preparation import (
     AIProviderError,
@@ -31,7 +35,7 @@ from .ai_preparation import (
     build_ai_prompt,
     build_subject_options,
     extract_pdf_pages,
-    generate_with_fallback,
+    generate_with_groq,
     parse_ai_questions,
     select_papers_for_year_range,
     validate_and_enrich_questions,
@@ -45,15 +49,36 @@ from .database import (
     verify_schema,
 )
 from .dev_seed import seed_demo_data
-from .file_storage import delete_institute_document, delete_uploaded_file
-from .mailer import send_institute_approval_email, send_password_reset_otp
+from .file_storage import (
+    delete_institute_document,
+    delete_uploaded_file,
+    resolve_uploaded_file,
+)
+from .object_storage import (
+    ObjectStorageConfigurationError,
+    delete_stored_resource_file,
+    get_resource_object,
+    is_object_storage_path,
+    store_resource_file,
+    validate_resource_storage_configuration,
+)
+from .mailer import (
+    send_email_verification_otp,
+    send_institute_approval_email,
+    send_login_otp,
+    send_password_reset_otp,
+)
 from .rate_limit import SlidingWindowLimiter, client_address
 from .schemas import (
     AIPreparationGenerateRequest,
     DepartmentCreate,
     DepartmentUpdate,
+    EmailVerificationConfirm,
+    EmailVerificationRequest,
     InstituteApprovalUpdate,
     LoginRequest,
+    LoginOtpConfirm,
+    LoginOtpResend,
     Password,
     PasswordResetConfirm,
     PasswordResetRequest,
@@ -63,6 +88,7 @@ from .schemas import (
     RegistrationText,
     RegisterRequest,
     ResourceReviewUpdate,
+    ResourceUploadPermissionUpdate,
     UserCreate,
     UserUpdate,
 )
@@ -81,6 +107,12 @@ logger = logging.getLogger(__name__)
 PASSWORD_RESET_COOLDOWN_SECONDS = 60
 PASSWORD_RESET_EXPIRY_MINUTES = 10
 PASSWORD_RESET_MAX_ATTEMPTS = 5
+EMAIL_VERIFICATION_COOLDOWN_SECONDS = 60
+EMAIL_VERIFICATION_EXPIRY_MINUTES = 10
+EMAIL_VERIFICATION_MAX_ATTEMPTS = 5
+LOGIN_OTP_COOLDOWN_SECONDS = 60
+LOGIN_OTP_EXPIRY_MINUTES = 10
+LOGIN_OTP_MAX_ATTEMPTS = 5
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -130,8 +162,46 @@ RESOURCE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOGIN_LIMITER = SlidingWindowLimiter(limit=15, window_seconds=15 * 60)
 REGISTER_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
 PASSWORD_RESET_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
-AI_HOURLY_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
-AI_DAILY_LIMITER = SlidingWindowLimiter(limit=20, window_seconds=24 * 60 * 60)
+EMAIL_VERIFICATION_REQUEST_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
+EMAIL_VERIFICATION_CONFIRM_LIMITER = SlidingWindowLimiter(limit=10, window_seconds=60 * 60)
+LOGIN_OTP_RESEND_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60 * 60)
+LOGIN_OTP_CONFIRM_LIMITER = SlidingWindowLimiter(limit=10, window_seconds=60 * 60)
+AI_HOURLY_LIMIT = 5
+AI_DAILY_LIMIT = 20
+AI_HOURLY_LIMITER = SlidingWindowLimiter(limit=AI_HOURLY_LIMIT, window_seconds=60 * 60)
+AI_DAILY_LIMITER = SlidingWindowLimiter(limit=AI_DAILY_LIMIT, window_seconds=24 * 60 * 60)
+AI_QUOTA_LOCK = threading.Lock()
+
+
+def ai_generation_quota(user: dict) -> dict:
+    quota_key = str(user.get("id") or user.get("email") or "unknown-user")
+    return {
+        "hourly": AI_HOURLY_LIMITER.status(quota_key),
+        "daily": AI_DAILY_LIMITER.status(quota_key),
+    }
+
+
+def consume_ai_generation_quota(user: dict) -> None:
+    quota_key = str(user.get("id") or user.get("email") or "unknown-user")
+    limits = (
+        ("hourly", AI_HOURLY_LIMITER, AI_HOURLY_LIMIT,
+         "You have reached your per-account hourly AI request limit."),
+        ("daily", AI_DAILY_LIMITER, AI_DAILY_LIMIT,
+         "You have reached your per-account daily AI request limit."),
+    )
+    # Check both windows before consuming either one, so a daily rejection
+    # does not accidentally use an hourly request.
+    with AI_QUOTA_LOCK:
+        for _name, limiter, limit, message in limits:
+            result = limiter.peek(quota_key)
+            if not result.allowed:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    f"{message} The limit is {limit} requests; wait for the displayed retry time.",
+                    headers={"Retry-After": str(result.retry_after)},
+                )
+        AI_HOURLY_LIMITER.check(quota_key)
+        AI_DAILY_LIMITER.check(quota_key)
 
 
 def rate_limit_dependency(limiter: SlidingWindowLimiter, message: str):
@@ -158,6 +228,18 @@ register_limit = rate_limit_dependency(
 password_reset_limit = rate_limit_dependency(
     PASSWORD_RESET_LIMITER, "Too many reset requests. Try again later."
 )
+email_verification_request_limit = rate_limit_dependency(
+    EMAIL_VERIFICATION_REQUEST_LIMITER, "Too many verification requests. Try again later."
+)
+email_verification_confirm_limit = rate_limit_dependency(
+    EMAIL_VERIFICATION_CONFIRM_LIMITER, "Too many verification attempts. Try again later."
+)
+login_otp_resend_limit = rate_limit_dependency(
+    LOGIN_OTP_RESEND_LIMITER, "Too many sign-in code requests. Try again later."
+)
+login_otp_confirm_limit = rate_limit_dependency(
+    LOGIN_OTP_CONFIRM_LIMITER, "Too many sign-in code attempts. Try again later."
+)
 
 
 @asynccontextmanager
@@ -180,7 +262,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.mount("/admin", StaticFiles(directory=ADMIN_DASHBOARD_DIR, html=True), name="admin")
 
 
@@ -209,7 +290,9 @@ def user_json(user: dict) -> dict:
         "username": user.get("username"),
         "name": user["name"],
         "role": user["role"],
+        "email_verified": bool(user.get("email_verified", 1)),
         "approval_status": user.get("approval_status", "approved"),
+        "resource_upload_permission_status": user.get("resource_upload_permission_status", "not_requested"),
         "institute_name": user.get("institute_name"),
         "phone": user.get("phone"),
         "designation": user.get("designation"),
@@ -266,7 +349,7 @@ def resource_json(resource: dict) -> dict:
 
 
 def resolve_resource_file(file_path: object) -> Path | None:
-    if not isinstance(file_path, str) or not file_path.strip():
+    if not isinstance(file_path, str) or not file_path.strip() or is_object_storage_path(file_path):
         return None
     if Path(file_path).name != file_path:
         return None
@@ -278,17 +361,7 @@ def resolve_resource_file(file_path: object) -> Path | None:
 
 
 def delete_resource_file(file_path: object) -> bool:
-    candidate = resolve_resource_file(file_path)
-    if candidate is None:
-        return False
-    try:
-        candidate.unlink()
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError:
-        logger.warning("Could not delete private resource file", exc_info=True)
-        return False
+    return delete_stored_resource_file(file_path, RESOURCE_UPLOAD_DIR)
 
 
 PAPER_SELECT = """
@@ -321,8 +394,32 @@ def require_user(
     user = query_one(db, "SELECT * FROM profiles WHERE id = %s", (user_id,))
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User account not found")
+    if not bool(user.get("email_verified", 1)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Verify your email before using the app")
     if not token_version_is_current(token_version, user["token_version"]):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
+    return user
+
+
+def get_optional_user(
+    request: Request,
+    db=Depends(get_db),
+) -> dict | None:
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    token_data = decode_access_token(token)
+    if not token_data:
+        return None
+    user_id, token_version = token_data
+    user = query_one(db, "SELECT * FROM profiles WHERE id = %s", (user_id,))
+    if (
+        not user
+        or not bool(user.get("email_verified", 1))
+        or not token_version_is_current(token_version, user["token_version"])
+    ):
+        return None
     return user
 
 
@@ -426,7 +523,122 @@ def password_reset_code_hash(email: str, otp: str) -> str:
     ).hexdigest()
 
 
+def email_verification_code_hash(email: str, otp: str) -> str:
+    return hmac.new(
+        JWT_SECRET.encode("utf-8"),
+        f"email-verification:{email}:{otp}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def login_code_hash(email: str, otp: str) -> str:
+    return hmac.new(
+        JWT_SECRET.encode("utf-8"),
+        f"login-otp:{email}:{otp}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def issue_login_code(db, email: str, account: dict) -> int:
+    execute(db, """
+        INSERT IGNORE INTO login_otps (email, user_id, code_hash, expires_at, resend_after, attempts, used_at)
+        VALUES (%s, NULL, NULL, NULL, UTC_TIMESTAMP(), 0, NULL)
+    """, (email,))
+    record = query_one(db, """
+        SELECT *, resend_after > UTC_TIMESTAMP() AS cooldown_active,
+            GREATEST(0, TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), resend_after)) AS cooldown_seconds
+        FROM login_otps WHERE email = %s FOR UPDATE
+    """, (email,))
+    if record["cooldown_active"]:
+        db.commit()
+        return max(1, record["cooldown_seconds"])
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    execute(db, """
+        UPDATE login_otps SET user_id = %s, code_hash = %s,
+            expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %s MINUTE),
+            resend_after = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %s SECOND),
+            attempts = 0, used_at = NULL WHERE email = %s
+    """, (account["id"], login_code_hash(email, otp), LOGIN_OTP_EXPIRY_MINUTES,
+           LOGIN_OTP_COOLDOWN_SECONDS, email))
+    db.commit()
+    try:
+        send_login_otp(email, account["name"], otp)
+    except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
+        logger.exception("Unable to send sign-in code")
+        execute(db, "UPDATE login_otps SET code_hash = NULL, expires_at = NULL, resend_after = UTC_TIMESTAMP() WHERE email = %s", (email,))
+        db.commit()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Could not send sign-in code. Check email configuration and try again.")
+    return LOGIN_OTP_COOLDOWN_SECONDS
+
+
+def issue_email_verification_code(db, email: str, account: dict) -> int:
+    """Create one expiring OTP, persist its HMAC, and deliver it by email."""
+    execute(
+        db,
+        """
+        INSERT IGNORE INTO email_verification_otps (
+            email, user_id, code_hash, expires_at, resend_after, attempts, used_at
+        ) VALUES (%s, NULL, NULL, NULL, UTC_TIMESTAMP(), 0, NULL)
+        """,
+        (email,),
+    )
+    verification = query_one(
+        db,
+        """
+        SELECT *,
+            resend_after > UTC_TIMESTAMP() AS cooldown_active,
+            GREATEST(0, TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), resend_after)) AS cooldown_seconds
+        FROM email_verification_otps
+        WHERE email = %s
+        FOR UPDATE
+        """,
+        (email,),
+    )
+    if verification["cooldown_active"]:
+        db.commit()
+        return max(1, verification["cooldown_seconds"])
+
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    execute(
+        db,
+        """
+        UPDATE email_verification_otps
+        SET user_id = %s,
+            code_hash = %s,
+            expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %s MINUTE),
+            resend_after = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %s SECOND),
+            attempts = 0,
+            used_at = NULL
+        WHERE email = %s
+        """,
+        (
+            account["id"],
+            email_verification_code_hash(email, otp),
+            EMAIL_VERIFICATION_EXPIRY_MINUTES,
+            EMAIL_VERIFICATION_COOLDOWN_SECONDS,
+            email,
+        ),
+    )
+    db.commit()
+    try:
+        send_email_verification_otp(email, account["name"], otp)
+    except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
+        logger.exception("Unable to send email verification code")
+        execute(
+            db,
+            """
+            UPDATE email_verification_otps
+            SET code_hash = NULL, expires_at = NULL, resend_after = UTC_TIMESTAMP()
+            WHERE email = %s
+            """,
+            (email,),
+        )
+        db.commit()
+    return EMAIL_VERIFICATION_COOLDOWN_SECONDS
+
+
 def initialize_database() -> None:
+    validate_resource_storage_configuration()
     admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
     admin_password = os.getenv("ADMIN_PASSWORD", "")
     if bool(admin_email) != bool(admin_password):
@@ -500,6 +712,19 @@ def health():
     return {"status": "ok", "version": app.version, "ai": ai_provider_status()}
 
 
+@app.get("/uploads/{filename}")
+def get_uploaded_paper(filename: str, _user: dict = Depends(require_user)):
+    file_path = resolve_uploaded_file(f"/uploads/{filename}", UPLOAD_DIR)
+    if file_path is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Paper file not found")
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=file_path.name,
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @app.post(
     "/api/auth/register",
     status_code=status.HTTP_201_CREATED,
@@ -519,8 +744,9 @@ def register(payload: RegisterRequest, db=Depends(get_db)):
         db,
         """
         INSERT INTO profiles (
-            id, email, name, password_hash, role, approval_status, institute_name, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            id, email, name, password_hash, role, email_verified, approval_status,
+            institute_name, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, 0, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """,
         (
             profile_id,
@@ -547,9 +773,12 @@ def register(payload: RegisterRequest, db=Depends(get_db)):
     )
     commit_or_conflict(db)
     user = query_one(db, "SELECT * FROM profiles WHERE id = %s", (profile_id,))
+    resend_after = issue_email_verification_code(db, email, user)
     return {
-        "user": user_json(user),
-        "session": {"access_token": create_access_token(profile_id, user["token_version"]), "token_type": "bearer"},
+        "verification_required": True,
+        "email": email,
+        "resend_after_seconds": resend_after,
+        "message": "Account created. Enter the verification code sent to your email before signing in.",
     }
 
 
@@ -609,9 +838,9 @@ async def register_institute(
             """
             INSERT INTO profiles (
                 id, email, name, password_hash, role, approval_status, institute_name,
-                phone, designation, institute_document_path, institute_document_name,
+                email_verified, phone, designation, institute_document_path, institute_document_name,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, 'institute', 'pending', %s, %s, %s, %s, %s,
+            ) VALUES (%s, %s, %s, %s, 'institute', 'pending', %s, 0, %s, %s, %s, %s,
                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             (
@@ -645,9 +874,102 @@ async def register_institute(
         raise
 
     user = query_one(db, "SELECT * FROM profiles WHERE id = %s", (profile_id,))
+    resend_after = issue_email_verification_code(db, email, user)
     return {
-        "user": user_json(user),
-        "session": {"access_token": create_access_token(profile_id, user["token_version"]), "token_type": "bearer"},
+        "verification_required": True,
+        "email": email,
+        "resend_after_seconds": resend_after,
+        "message": "Account created. Verify your email first; institute access also requires administrator approval.",
+    }
+
+
+@app.post(
+    "/api/auth/email-verification/request",
+    dependencies=[Depends(email_verification_request_limit)],
+)
+def request_email_verification(
+    payload: EmailVerificationRequest,
+    db=Depends(get_db),
+):
+    email = payload.email.lower()
+    account = query_one(
+        db,
+        "SELECT id, name FROM profiles WHERE LOWER(email) = %s AND email_verified = 0",
+        (email,),
+    )
+    if account:
+        resend_after = issue_email_verification_code(db, email, account)
+    else:
+        db.commit()
+        resend_after = EMAIL_VERIFICATION_COOLDOWN_SECONDS
+    return {
+        "message": "If this email needs verification, a code has been sent.",
+        "resend_after_seconds": resend_after,
+    }
+
+
+@app.post(
+    "/api/auth/email-verification/confirm",
+    dependencies=[Depends(email_verification_confirm_limit)],
+)
+def confirm_email_verification(
+    payload: EmailVerificationConfirm,
+    db=Depends(get_db),
+):
+    email = payload.email.lower()
+    verification = query_one(
+        db,
+        """
+        SELECT *, expires_at > UTC_TIMESTAMP() AS code_is_active
+        FROM email_verification_otps
+        WHERE email = %s
+        FOR UPDATE
+        """,
+        (email,),
+    )
+    account = query_one(
+        db,
+        "SELECT * FROM profiles WHERE LOWER(email) = %s FOR UPDATE",
+        (email,),
+    )
+    valid = bool(
+        account
+        and not account.get("email_verified")
+        and verification
+        and verification["user_id"] == account["id"]
+        and verification["code_hash"]
+        and not verification["used_at"]
+        and verification["code_is_active"]
+        and verification["attempts"] < EMAIL_VERIFICATION_MAX_ATTEMPTS
+        and hmac.compare_digest(
+            verification["code_hash"],
+            email_verification_code_hash(email, payload.otp),
+        )
+    )
+    if not valid:
+        if verification and verification["attempts"] < EMAIL_VERIFICATION_MAX_ATTEMPTS:
+            execute(
+                db,
+                "UPDATE email_verification_otps SET attempts = attempts + 1 WHERE email = %s",
+                (email,),
+            )
+        db.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired verification code")
+
+    execute(db, "UPDATE profiles SET email_verified = 1 WHERE id = %s", (account["id"],))
+    execute(
+        db,
+        "UPDATE email_verification_otps SET used_at = UTC_TIMESTAMP() WHERE email = %s",
+        (email,),
+    )
+    db.commit()
+    account = query_one(db, "SELECT * FROM profiles WHERE id = %s", (account["id"],))
+    return {
+        "user": user_json(account),
+        "session": {
+            "access_token": create_access_token(account["id"], account["token_version"]),
+            "token_type": "bearer",
+        },
     }
 
 
@@ -660,6 +982,36 @@ def login(payload: LoginRequest, db=Depends(get_db)):
     )
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if not bool(user.get("email_verified", 1)):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Verify your email before signing in. Request a new code if needed.",
+        )
+    resend_after = issue_login_code(db, user["email"].lower(), user)
+    return {
+        "otp_required": True,
+        "email": user["email"],
+        "resend_after_seconds": resend_after,
+        "message": "If the account is eligible, a sign-in code has been sent.",
+    }
+
+
+@app.post("/api/auth/admin/login", dependencies=[Depends(login_limit)])
+def admin_login(payload: LoginRequest, db=Depends(get_db)):
+    user = query_one(
+        db,
+        "SELECT * FROM profiles WHERE LOWER(email) = %s",
+        (payload.email.lower(),),
+    )
+    if not user or not verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if user["role"] != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator account required")
+    if not bool(user.get("email_verified", 1)):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Verify your email before signing in.",
+        )
     execute(
         db,
         """
@@ -673,6 +1025,53 @@ def login(payload: LoginRequest, db=Depends(get_db)):
         "user": user_json(user),
         "session": {
             "access_token": create_access_token(user["id"], user["token_version"]),
+            "token_type": "bearer",
+        },
+    }
+
+
+@app.post("/api/auth/login/otp/resend", dependencies=[Depends(login_otp_resend_limit)])
+def resend_login_otp(payload: LoginOtpResend, db=Depends(get_db)):
+    user = query_one(db, "SELECT * FROM profiles WHERE LOWER(email) = %s", (payload.email.lower(),))
+    if not user or not verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if not bool(user.get("email_verified", 1)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Verify your email before signing in.")
+    resend_after = issue_login_code(db, user["email"].lower(), user)
+    return {"message": "If the account is eligible, a sign-in code has been sent.", "resend_after_seconds": resend_after}
+
+
+@app.post("/api/auth/login/otp/confirm", dependencies=[Depends(login_otp_confirm_limit)])
+def confirm_login_otp(payload: LoginOtpConfirm, db=Depends(get_db)):
+    email = payload.email.lower()
+    code = query_one(db, "SELECT *, expires_at > UTC_TIMESTAMP() AS code_is_active FROM login_otps WHERE email = %s FOR UPDATE", (email,))
+    account = query_one(db, "SELECT * FROM profiles WHERE LOWER(email) = %s FOR UPDATE", (email,))
+    valid = bool(
+        account and bool(account.get("email_verified", 1)) and code
+        and code["user_id"] == account["id"] and code["code_hash"] and not code["used_at"]
+        and code["code_is_active"] and code["attempts"] < LOGIN_OTP_MAX_ATTEMPTS
+        and hmac.compare_digest(code["code_hash"], login_code_hash(email, payload.otp))
+    )
+    if not valid:
+        if code and not code["used_at"] and code["attempts"] < LOGIN_OTP_MAX_ATTEMPTS:
+            execute(db, "UPDATE login_otps SET attempts = attempts + 1 WHERE email = %s", (email,))
+        db.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired sign-in code")
+    execute(db, "UPDATE login_otps SET used_at = UTC_TIMESTAMP() WHERE email = %s", (email,))
+    execute(
+        db,
+        """
+        INSERT INTO activity_logs (id, type, message, user_id, created_at)
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+        """,
+        (str(uuid4()), "login", f"{account['name']} logged in", account["id"]),
+    )
+    db.commit()
+    account = query_one(db, "SELECT * FROM profiles WHERE id = %s", (account["id"],))
+    return {
+        "user": user_json(account),
+        "session": {
+            "access_token": create_access_token(account["id"], account["token_version"]),
             "token_type": "bearer",
         },
     }
@@ -860,7 +1259,15 @@ def create_department(
     db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
-    require_roles(user, {"super_admin"})
+    require_roles(user, {"super_admin", "institute", "user"})
+    if (
+        user["role"] == "user"
+        and user.get("resource_upload_permission_status") != "approved"
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Reader upload permission is required to add a department.",
+        )
     department_id = str(uuid4())
     execute(
         db,
@@ -881,7 +1288,7 @@ def update_department(
     db=Depends(get_db),
     user: dict = Depends(require_user),
 ):
-    require_roles(user, {"super_admin"})
+    require_roles(user, {"super_admin", "institute"})
     if not query_one(db, "SELECT id FROM departments WHERE id = %s", (department_id,)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Department not found")
     changes = payload.model_dump(exclude_unset=True)
@@ -998,11 +1405,13 @@ def list_resources(
     resource_type: Literal["notes", "assignments", "other"] | None = None,
     search: str | None = None,
     db=Depends(get_db),
-    user: dict = Depends(require_user),
+    user: dict | None = Depends(get_optional_user),
 ):
     conditions = []
     params = []
-    if user["role"] != "super_admin":
+    if user is None:
+        conditions.append("r.status = 'approved'")
+    elif user["role"] != "super_admin":
         conditions.append("(r.status = 'approved' OR r.uploaded_by = %s)")
         params.append(user["id"])
     if department:
@@ -1042,6 +1451,11 @@ async def create_resource(
     user: dict = Depends(require_user),
 ):
     require_roles(user, {"user", "super_admin"})
+    if user["role"] == "user" and user.get("resource_upload_permission_status") != "approved":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Request and receive administrator permission before uploading study resources",
+        )
     title = title.strip()
     if len(title) < 2:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Title must contain at least 2 characters")
@@ -1059,9 +1473,20 @@ async def create_resource(
 
     resource_id = str(uuid4())
     file_name = f"{resource_id}.pdf"
-    stored_path = RESOURCE_UPLOAD_DIR / file_name
-    stored_path.write_bytes(contents)
-    review_status = "approved" if user["role"] == "super_admin" else "pending"
+    try:
+        stored_file_path = await run_in_threadpool(
+            store_resource_file,
+            file_name,
+            contents,
+            RESOURCE_UPLOAD_DIR,
+        )
+    except ObjectStorageConfigurationError:
+        logger.exception("Resource storage configuration is invalid")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Resource storage is not configured") from None
+    except Exception:
+        logger.exception("Could not store uploaded resource")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Could not store uploaded resource") from None
+    review_status = "approved" if user["role"] in {"super_admin", "user"} else "pending"
     try:
         execute(
             db,
@@ -1084,7 +1509,7 @@ async def create_resource(
                 semester,
                 academic_year.strip() if academic_year else None,
                 description.strip() if description and description.strip() else None,
-                file_name,
+                stored_file_path,
                 Path(file.filename or "resource.pdf").name,
                 user["id"],
                 user["name"],
@@ -1102,7 +1527,7 @@ async def create_resource(
         commit_or_conflict(db)
     except Exception:
         db.rollback()
-        delete_resource_file(file_name)
+        delete_resource_file(stored_file_path)
         raise
     resource = query_one(
         db,
@@ -1114,6 +1539,53 @@ async def create_resource(
         (resource_id,),
     )
     return resource_json(resource)
+
+
+@app.post("/api/resources/upload-permission")
+def request_resource_upload_permission(
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    require_roles(user, {"user"})
+    current = user.get("resource_upload_permission_status", "not_requested")
+    if current == "approved":
+        return {"status": current}
+    if current == "pending":
+        return {"status": current}
+    execute(
+        db,
+        "UPDATE profiles SET resource_upload_permission_status = 'pending' WHERE id = %s",
+        (user["id"],),
+    )
+    record_activity(db, "resource_upload_permission_requested", f"{user['name']} requested study resource upload permission", user["id"])
+    commit_or_conflict(db)
+    return {"status": "pending"}
+
+
+@app.put("/api/users/{user_id}/resource-upload-permission")
+def update_resource_upload_permission(
+    user_id: str,
+    payload: ResourceUploadPermissionUpdate,
+    db=Depends(get_db),
+    user: dict = Depends(require_user),
+):
+    require_roles(user, {"super_admin"})
+    target = query_one(db, "SELECT id, name, role FROM profiles WHERE id = %s", (user_id,))
+    if not target or target["role"] != "user":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reader account not found")
+    execute(
+        db,
+        "UPDATE profiles SET resource_upload_permission_status = %s WHERE id = %s",
+        (payload.status, user_id),
+    )
+    record_activity(
+        db,
+        f"resource_upload_permission_{payload.status}",
+        f"{_actor_label(user)} {payload.status} study resource upload permission for {target['name']}",
+        user["id"],
+    )
+    commit_or_conflict(db)
+    return {"user_id": user_id, "status": payload.status}
 
 
 @app.get("/api/resources/{resource_id}/file")
@@ -1132,7 +1604,41 @@ def get_resource_file(
     )
     if not can_view:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
-    path = resolve_resource_file(resource.get("file_path"))
+    stored_path = resource.get("file_path")
+    if is_object_storage_path(stored_path):
+        try:
+            stored_object = get_resource_object(stored_path)
+        except ClientError as error:
+            error_code = error.response.get("Error", {}).get("Code")
+            if error_code in {"NoSuchKey", "NoSuchObject", "404", "NotFound"}:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource file not found") from error
+            logger.exception("Could not retrieve private resource from object storage")
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Could not retrieve resource file") from None
+        except Exception:
+            logger.exception("Could not retrieve private resource from object storage")
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Could not retrieve resource file") from None
+        if stored_object is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource file not found")
+
+        body = stored_object["Body"]
+
+        def stream_object():
+            try:
+                yield from body.iter_chunks(chunk_size=64 * 1024)
+            finally:
+                body.close()
+
+        filename = Path(resource["original_file_name"]).name
+        headers = {
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if stored_object.get("ContentLength") is not None:
+            headers["Content-Length"] = str(stored_object["ContentLength"])
+        return StreamingResponse(stream_object(), media_type="application/pdf", headers=headers)
+
+    path = resolve_resource_file(stored_path)
     if path is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource file not found")
     return FileResponse(
@@ -1208,7 +1714,16 @@ def ai_preparation_options(
         db,
         AI_PAPER_SELECT + " WHERE p.file_url IS NOT NULL AND TRIM(p.file_url) <> ''",
     )
-    return {"subjects": build_subject_options(rows, UPLOAD_DIR)}
+    return {
+        "subjects": build_subject_options(rows, UPLOAD_DIR),
+        "quota": ai_generation_quota(user),
+    }
+
+
+@app.get("/api/ai-prep/quota")
+def ai_preparation_quota(user: dict = Depends(require_user)):
+    require_roles(user, {"user"})
+    return ai_generation_quota(user)
 
 
 @app.post("/api/ai-prep/generate")
@@ -1233,21 +1748,6 @@ def generate_ai_preparation(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "The start year must be before or equal to the end year.",
         )
-
-    # Charge the quota only after the cheap validation above, so a typo does not
-    # burn a student's allowance, but before the expensive PDF/OCR work below.
-    quota_key = str(user.get("id") or user.get("email") or "unknown-user")
-    for limiter, message in (
-        (AI_HOURLY_LIMITER, "You have reached the hourly AI generation limit. Try again later."),
-        (AI_DAILY_LIMITER, "You have reached the daily AI generation limit. Try again tomorrow."),
-    ):
-        result = limiter.check(quota_key)
-        if not result.allowed:
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                message,
-                headers={"Retry-After": str(result.retry_after)},
-            )
 
     rows = query_all(
         db,
@@ -1290,6 +1790,10 @@ def generate_ai_preparation(
             f"{MAX_SOURCE_PAPERS} or fewer.",
         )
 
+    # Don't use a request allowance for an invalid or empty paper selection.
+    # Consume it before expensive PDF/OCR work starts.
+    consume_ai_generation_quota(user)
+
     pages_by_paper = {}
     try:
         total_pages = 0
@@ -1312,9 +1816,9 @@ def generate_ai_preparation(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
 
     try:
-        provider_response, provider = generate_with_fallback(
+        provider_response, provider = generate_with_groq(
             prompt,
-            allow_hosted_fallback=payload.hosted_fallback_consent,
+            consent_to_groq=payload.hosted_fallback_consent,
         )
         questions = parse_ai_questions(provider_response)
         questions = validate_and_enrich_questions(
@@ -1334,7 +1838,7 @@ def generate_ai_preparation(
         "feature": payload.feature,
         "provider": provider,
         "hosted_provider_disclosure": (
-            "Source PDF text was sent to the configured hosted AI provider."
+            "Source PDF text was sent to Groq."
             if provider == "hosted"
             else None
         ),
@@ -1367,7 +1871,11 @@ def get_paper(paper_id: str, db=Depends(get_db)):
 
 
 @app.post("/api/papers/{paper_id}/views")
-def increment_views(paper_id: str, db=Depends(get_db)):
+def increment_views(
+    paper_id: str,
+    db=Depends(get_db),
+    _user: dict = Depends(require_user),
+):
     if execute(db, "UPDATE papers SET views = views + 1 WHERE id = %s", (paper_id,)) == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Paper not found")
     db.commit()
@@ -1375,7 +1883,11 @@ def increment_views(paper_id: str, db=Depends(get_db)):
 
 
 @app.post("/api/papers/{paper_id}/downloads")
-def increment_downloads(paper_id: str, db=Depends(get_db)):
+def increment_downloads(
+    paper_id: str,
+    db=Depends(get_db),
+    _user: dict = Depends(require_user),
+):
     if execute(db, "UPDATE papers SET downloads = downloads + 1 WHERE id = %s", (paper_id,)) == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Paper not found")
     db.commit()
@@ -1603,6 +2115,8 @@ def update_institute_approval(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target["role"] != "institute":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only institute accounts require approval")
+    if payload.approval_status == "approved" and not bool(target.get("email_verified", 1)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Verify the institute email before approving this account")
     approval_changed = target["approval_status"] != payload.approval_status
     execute(
         db,

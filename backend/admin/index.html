@@ -158,6 +158,13 @@
         <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
         <button type="submit">Sign in</button>
       </form>
+      <form id="login-otp-form" hidden>
+        <label>6-digit sign-in code<input id="login-otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label>
+        <button type="submit">Verify and sign in</button>
+        <button id="resend-login-otp" class="secondary" type="button">Resend code</button>
+        <p id="login-otp-countdown" class="muted" aria-live="polite"></p>
+        <button id="cancel-login-otp" class="secondary" type="button">Back to sign in</button>
+      </form>
       <button id="forgot-password" class="secondary" type="button" style="width:100%;margin-top:10px">Forgot password?</button>
       <form id="reset-request-form" hidden>
         <label>Email<input id="reset-email" type="email" autocomplete="email" required></label>
@@ -199,6 +206,7 @@
             <button data-section="resources">Study resources</button>
             <button data-section="departments" class="super-only">Departments</button>
             <button data-section="approvals" class="super-only">Institute approvals</button>
+            <button data-section="reader-uploads" class="super-only">Reader Uploads Approval</button>
             <button data-section="activity">Activity log</button>
           </nav>
         </aside>
@@ -314,6 +322,15 @@
         </div>
       </section>
 
+      <section id="section-reader-uploads" class="section">
+        <div class="page-heading"><h2>Reader Uploads Approval</h2><p>Review reader requests to upload notes and other study resources.</p></div>
+        <div class="panel">
+          <h2>Reader upload requests (<span id="reader-upload-count">0</span>)</h2>
+          <p class="muted">Approve pending requests to let readers submit study resources for review.</p>
+          <div class="table-wrap"><table><thead><tr><th>Reader</th><th>Department</th><th>Registered</th><th>Upload permission</th><th>Actions</th></tr></thead><tbody id="reader-upload-approvals"></tbody></table></div>
+        </div>
+      </section>
+
       <section id="section-activity" class="section">
         <div class="page-heading"><h2>Activity log</h2><p>Recent administrative events recorded by the platform.</p></div>
         <div class="panel"><div class="table-wrap"><table><thead><tr><th>When</th><th>Activity</th><th>User ID</th></tr></thead><tbody id="activity"></tbody></table></div></div>
@@ -351,6 +368,8 @@
     const USER_PAGE_SIZE = 10;
     const byId = (id) => document.getElementById(id);
     let resendTimer = null;
+    let loginResendTimer = null;
+    let loginCredentials = null;
     if (location.protocol === 'file:') {
       byId('hosting-warning').style.display = 'block';
       byId('login-form').hidden = true;
@@ -517,6 +536,8 @@
       const students = users.filter((user) => user.role === 'user').length;
       const pendingInstitutes = users.filter((user) =>
         user.role === 'institute' && user.approval_status === 'pending').length;
+      const pendingUploadPermissions = users.filter((user) =>
+        user.role === 'user' && user.resource_upload_permission_status === 'pending').length;
       const subjects = new Set(state.papers.map((paper) =>
         `${paper.department_id}:${String(paper.subject_code || paper.subject).trim().toLocaleLowerCase()}`));
       const values = [
@@ -525,6 +546,7 @@
         ['Subjects in library', subjects.size],
         ['Departments', stats.totalDepartments],
         ['Pending resource approvals', state.resources.filter((resource) => resource.status === 'pending').length],
+        ...(state.user.role === 'super_admin' ? [['Reader upload requests', pendingUploadPermissions]] : []),
         ...(state.user.role === 'super_admin' ? [['Pending institutes', pendingInstitutes]] : []),
       ];
       byId('metrics').innerHTML = values.map(([label, value]) =>
@@ -552,7 +574,7 @@
         const fileUrl = safePaperUrl(paper.file_url);
         return `<tr>
           <td><strong>${escapeHtml(paper.subject)}</strong><div class="muted">${escapeHtml(paper.subject_code || '')} · Sem ${escapeHtml(paper.semester)} · ${escapeHtml(paper.year)}</div>
-            ${fileUrl ? `<a href="${escapeHtml(fileUrl)}" target="_blank" rel="noopener">Open PDF</a>` : '<span class="muted">No PDF</span>'}</td>
+            ${fileUrl ? `<button class="secondary" type="button" data-open-paper-url="${escapeHtml(fileUrl)}">Open PDF</button>` : '<span class="muted">No PDF</span>'}</td>
           <td>${escapeHtml(paper.department_name || '')}</td>
           <td>${escapeHtml(paper.exam_type)}</td>
           <td>${escapeHtml(paper.views)} views<br>${escapeHtml(paper.downloads)} downloads</td>
@@ -623,6 +645,27 @@
             ${canDelete ? `<button class="danger" data-delete-user="${escapeHtml(user.id)}">Remove</button>` : ''}</td>
         </tr>`;
       }).join('') || '<tr><td colspan="7" class="empty-state">No accounts match these filters.</td></tr>';
+    }
+
+    function renderReaderUploadApprovals(users) {
+      const departmentNames = new Map(state.departments.map((department) => [department.id, department.name]));
+      const requests = users.filter((user) =>
+        user.role === 'user' && (user.resource_upload_permission_status || 'not_requested') !== 'not_requested');
+      byId('reader-upload-count').textContent = String(requests.length);
+      byId('reader-upload-approvals').innerHTML = requests.map((user) => {
+        const permission = user.resource_upload_permission_status || 'not_requested';
+        return `<tr>
+          <td><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)}</div>
+            <div class="muted">${escapeHtml(user.username || '—')}</div></td>
+          <td>${escapeHtml(departmentNames.get(user.department_id) || '—')}</td>
+          <td>${escapeHtml(toLocal(user.created_at))}</td>
+          <td><span class="badge ${escapeHtml(permission)}">${escapeHtml(permission)}</span></td>
+          <td class="actions">${permission === 'pending'
+            ? `<button data-reader-upload-permission="approved" data-user-id="${escapeHtml(user.id)}">Allow uploads</button>
+              <button class="danger" data-reader-upload-permission="rejected" data-user-id="${escapeHtml(user.id)}">Decline</button>`
+            : '<span class="muted">Reviewed</span>'}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="5" class="empty-state">No reader upload requests yet.</td></tr>';
     }
 
     function renderRecentData(stats) {
@@ -700,6 +743,7 @@
       setDepartments(byId('resource-form').elements.department_id);
       const institutes = users.filter((account) => account.role === 'institute');
       renderInstituteApprovals(institutes, state.user.role === 'super_admin');
+      renderReaderUploadApprovals(users);
     }
 
     function populateDashboardFilters() {
@@ -731,13 +775,52 @@
       showLoginError('');
       const form = new FormData(event.currentTarget);
       try {
-        const result = await api('/api/auth/login', {
+        loginCredentials = { email: form.get('email'), password: form.get('password') };
+        const result = await api('/api/auth/admin/login', {
           method: 'POST',
-          body: JSON.stringify({ email: form.get('email'), password: form.get('password') }),
+          body: JSON.stringify(loginCredentials),
         });
-        if (result.user.role !== 'super_admin') {
-          throw new Error('Use the Campus-notes mobile app to sign in as a reader.');
+        if (result.session && result.user) {
+          state.token = result.session.access_token;
+          sessionStorage.setItem(tokenKey, state.token);
+          loginCredentials = null;
+          await showDashboard(result.user);
+          return;
         }
+        byId('login-form').hidden = true;
+        byId('login-otp-form').hidden = false;
+        byId('login-otp').focus();
+        startLoginOtpCountdown(result.resend_after_seconds || 60);
+        showLoginError(result.message || 'Check your email for a sign-in code.');
+      } catch (err) {
+        if (byId('dashboard').hidden) showLoginError(err.message);
+        else message(err.message);
+      }
+    });
+
+    function startLoginOtpCountdown(seconds) {
+      clearInterval(loginResendTimer);
+      let remaining = seconds;
+      const node = byId('login-otp-countdown');
+      const button = byId('resend-login-otp');
+      const tick = () => {
+        button.disabled = remaining > 0;
+        node.textContent = remaining > 0 ? `You can request another code in ${remaining}s.` : 'You can request another code now.';
+        if (remaining <= 0) clearInterval(loginResendTimer);
+        else remaining -= 1;
+      };
+      tick();
+      loginResendTimer = setInterval(tick, 1000);
+    }
+
+    byId('login-otp-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      showLoginError('');
+      try {
+        const result = await api('/api/auth/login/otp/confirm', {
+          method: 'POST', body: JSON.stringify({ email: loginCredentials.email, otp: byId('login-otp').value }),
+        });
+        if (result.user.role !== 'super_admin') throw new Error('Use the Campus-notes mobile app to sign in as a reader.');
         state.token = result.session.access_token;
         sessionStorage.setItem(tokenKey, state.token);
         await showDashboard(result.user);
@@ -745,6 +828,24 @@
         if (byId('dashboard').hidden) showLoginError(err.message);
         else message(err.message);
       }
+    });
+
+    byId('resend-login-otp').addEventListener('click', async () => {
+      try {
+        const result = await api('/api/auth/login/otp/resend', {
+          method: 'POST', body: JSON.stringify(loginCredentials),
+        });
+        startLoginOtpCountdown(result.resend_after_seconds || 60);
+        showLoginError(result.message || 'Check your email for a sign-in code.');
+      } catch (err) { showLoginError(err.message); }
+    });
+    byId('cancel-login-otp').addEventListener('click', () => {
+      clearInterval(loginResendTimer);
+      loginCredentials = null;
+      byId('login-otp-form').hidden = true;
+      byId('login-form').hidden = false;
+      byId('login-otp').value = '';
+      showLoginError('');
     });
 
     byId('logout').addEventListener('click', async () => {
@@ -844,6 +945,21 @@
       } catch (err) { message(err.message); }
     });
 
+    byId('reader-upload-approvals').addEventListener('click', async (event) => {
+      const actionButton = event.target.closest('[data-reader-upload-permission]');
+      if (!actionButton) return;
+      const action = actionButton.dataset.readerUploadPermission;
+      if (action === 'rejected' && !confirm('Decline this reader upload request?')) return;
+      try {
+        await api(`/api/users/${encodeURIComponent(actionButton.dataset.userId)}/resource-upload-permission`, {
+          method: 'PUT',
+          body: JSON.stringify({ status: action }),
+        });
+        await loadDashboard();
+        message(`Reader upload permission ${action}.`, false);
+      } catch (err) { message(err.message); }
+    });
+
     byId('paper-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -932,6 +1048,27 @@
     });
 
     byId('papers').addEventListener('click', async (event) => {
+      const open = event.target.closest('[data-open-paper-url]');
+      if (open) {
+        const viewer = window.open('about:blank', '_blank');
+        if (!viewer) {
+          message('Allow pop-ups to open the paper PDF.');
+          return;
+        }
+        try {
+          const response = await fetch(open.dataset.openPaperUrl, {
+            headers: { Authorization: `Bearer ${state.token}` },
+          });
+          if (!response.ok) throw new Error(`Could not open PDF (HTTP ${response.status}).`);
+          const objectUrl = URL.createObjectURL(await response.blob());
+          viewer.location.href = objectUrl;
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        } catch (err) {
+          viewer.close();
+          message(err.message);
+        }
+        return;
+      }
       const edit = event.target.closest('[data-edit-paper]');
       const remove = event.target.closest('[data-delete-paper]');
       try {

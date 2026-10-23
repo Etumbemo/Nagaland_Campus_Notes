@@ -390,7 +390,7 @@ def _call_hosted(prompt: str) -> str:
     model = os.getenv("HOSTED_AI_MODEL", "").strip()
     api_key = os.getenv("HOSTED_AI_API_KEY", "").strip()
     if not all((base_url, model, api_key)):
-        raise AIProviderError("Hosted AI fallback is not fully configured.")
+        raise AIProviderError("Groq is not fully configured.")
     try:
         response = httpx.post(
             f"{base_url}/chat/completions",
@@ -412,36 +412,17 @@ def _call_hosted(prompt: str) -> str:
     return content
 
 
-def generate_with_fallback(prompt: str, *, allow_hosted_fallback: bool) -> tuple[str, str]:
-    # Consent means the student chose hosted processing for this request. Try
-    # the configured Groq endpoint first; otherwise keep the paper text local.
-    hosted_error = None
-    if allow_hosted_fallback and _hosted_provider_configured():
-        try:
-            return _call_hosted(prompt), "hosted"
-        except AIProviderError as error:
-            hosted_error = error
-            logger.warning("Hosted AI provider failed; trying local Ollama: %s", hosted_error)
-
-    try:
-        return _call_ollama(prompt), "local"
-    except AIProviderError as local_error:
-        logger.warning("Local AI provider failed: %s", local_error)
-    if hosted_error:
+def generate_with_groq(prompt: str, *, consent_to_groq: bool) -> tuple[str, str]:
+    """Generate AI-preparation content only through Groq after explicit consent."""
+    if not consent_to_groq:
         raise AIUnavailableError(
-            "Groq and local AI are unavailable. Please retry later."
-        ) from hosted_error
+            "Consent to send the selected PDF text to Groq is required for generation."
+        )
     if not _hosted_provider_configured():
         raise AIUnavailableError(
-            "Local AI is unavailable and the hosted AI provider is not configured. "
-            "Try again later or contact the administrator."
+            "Groq is not configured. Please contact the administrator."
         )
-    if not allow_hosted_fallback:
-        raise AIUnavailableError(
-            "Local AI is unavailable. Consent to send the selected PDF text to Groq "
-            "to use the hosted provider."
-        )
-    raise AIUnavailableError("The configured AI providers are unavailable. Please retry later.")
+    return _call_hosted(prompt), "hosted"
 
 
 def parse_ai_questions(response_text: str) -> list[dict]:

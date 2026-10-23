@@ -53,8 +53,26 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class LoginOtpConfirm(BaseModel):
+    email: EmailStr
+    otp: str = Field(pattern=r"^\d{6}$")
+
+
+class LoginOtpResend(LoginRequest):
+    pass
+
+
 class PasswordResetRequest(BaseModel):
     email: EmailStr
+
+
+class EmailVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class EmailVerificationConfirm(BaseModel):
+    email: EmailStr
+    otp: str = Field(pattern=r"^\d{6}$")
 
 
 class PasswordResetConfirm(BaseModel):
@@ -149,4 +167,8 @@ class InstituteApprovalUpdate(BaseModel):
 
 
 class ResourceReviewUpdate(BaseModel):
+    status: Literal["approved", "rejected"]
+
+
+class ResourceUploadPermissionUpdate(BaseModel):
     status: Literal["approved", "rejected"]

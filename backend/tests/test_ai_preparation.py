@@ -223,41 +223,36 @@ def test_excessive_model_question_response_is_rejected():
         )
 
 
-def test_generation_falls_back_only_after_explicit_consent(monkeypatch):
-    monkeypatch.setattr(
-        ai_preparation,
-        "_call_ollama",
-        lambda _prompt: (_ for _ in ()).throw(ai_preparation.AIProviderError("offline")),
-    )
+def test_generation_uses_groq_only_after_explicit_consent(monkeypatch):
     monkeypatch.setattr(ai_preparation, "_hosted_provider_configured", lambda: True)
     monkeypatch.setattr(ai_preparation, "_call_hosted", lambda _prompt: '{"questions": []}')
 
-    with pytest.raises(ai_preparation.AIUnavailableError, match="consent"):
-        ai_preparation.generate_with_fallback("prompt", allow_hosted_fallback=False)
+    with pytest.raises(ai_preparation.AIUnavailableError, match="(?i)consent"):
+        ai_preparation.generate_with_groq("prompt", consent_to_groq=False)
 
-    response, provider = ai_preparation.generate_with_fallback(
+    response, provider = ai_preparation.generate_with_groq(
         "prompt",
-        allow_hosted_fallback=True,
+        consent_to_groq=True,
     )
     assert json.loads(response) == {"questions": []}
     assert provider == "hosted"
 
 
-def test_generation_reports_when_both_ai_providers_are_unavailable(monkeypatch):
-    monkeypatch.setattr(
-        ai_preparation,
-        "_call_ollama",
-        lambda _prompt: (_ for _ in ()).throw(ai_preparation.AIProviderError("offline")),
-    )
+def test_generation_does_not_fall_back_to_local_when_groq_fails(monkeypatch):
     monkeypatch.setattr(ai_preparation, "_hosted_provider_configured", lambda: True)
     monkeypatch.setattr(
         ai_preparation,
         "_call_hosted",
         lambda _prompt: (_ for _ in ()).throw(ai_preparation.AIProviderError("offline")),
     )
+    monkeypatch.setattr(
+        ai_preparation,
+        "_call_ollama",
+        lambda _prompt: pytest.fail("Local Ollama must not be called"),
+    )
 
-    with pytest.raises(ai_preparation.AIUnavailableError, match="Local and hosted AI providers"):
-        ai_preparation.generate_with_fallback("prompt", allow_hosted_fallback=True)
+    with pytest.raises(ai_preparation.AIProviderError, match="offline"):
+        ai_preparation.generate_with_groq("prompt", consent_to_groq=True)
 
 
 def test_generation_endpoint_rejects_count_above_feature_limit(monkeypatch, tmp_path):
@@ -281,6 +276,10 @@ def test_generation_endpoint_rejects_count_above_feature_limit(monkeypatch, tmp_
 
 
 def test_generation_endpoint_reports_missing_source_papers(monkeypatch, tmp_path):
+    hourly = main.SlidingWindowLimiter(limit=5, window_seconds=3600)
+    daily = main.SlidingWindowLimiter(limit=20, window_seconds=86400)
+    monkeypatch.setattr(main, "AI_HOURLY_LIMITER", hourly)
+    monkeypatch.setattr(main, "AI_DAILY_LIMITER", daily)
     monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
     monkeypatch.setattr(main, "query_all", lambda *_args: [])
     request = AIPreparationGenerateRequest(
@@ -299,6 +298,8 @@ def test_generation_endpoint_reports_missing_source_papers(monkeypatch, tmp_path
 
     assert error.value.status_code == 404
     assert "No uploaded question-paper PDFs" in error.value.detail
+    assert hourly.status("unknown-user")["remaining"] == 5
+    assert daily.status("unknown-user")["remaining"] == 20
 
 
 def test_generation_endpoint_uses_selected_papers_and_reports_shortfall(monkeypatch, tmp_path):
@@ -316,8 +317,8 @@ def test_generation_endpoint_uses_selected_papers_and_reports_shortfall(monkeypa
     monkeypatch.setattr(main, "extract_pdf_pages", lambda _path: ["Source paper text."])
     monkeypatch.setattr(
         main,
-        "generate_with_fallback",
-        lambda _prompt, *, allow_hosted_fallback: (
+        "generate_with_groq",
+        lambda _prompt, *, consent_to_groq: (
             json.dumps({
                 "questions": [{
                     "question": "Which algorithm uses a queue?",
@@ -328,7 +329,7 @@ def test_generation_endpoint_uses_selected_papers_and_reports_shortfall(monkeypa
                     "sources": [{"paper_id": "paper-2022", "page": 1, "question_number": "Q1"}],
                 }]
             }),
-            "local",
+            "hosted",
         ),
     )
     request = AIPreparationGenerateRequest(
@@ -340,6 +341,7 @@ def test_generation_endpoint_uses_selected_papers_and_reports_shortfall(monkeypa
         start_year=2022,
         end_year=2024,
         question_count=3,
+        hosted_fallback_consent=True,
     )
 
     result = main.generate_ai_preparation(
@@ -348,7 +350,7 @@ def test_generation_endpoint_uses_selected_papers_and_reports_shortfall(monkeypa
         user={"role": "user"},
     )
 
-    assert result["provider"] == "local"
+    assert result["provider"] == "hosted"
     assert result["source_papers_found"] == 2
     assert result["missing_years"] == [2023]
     assert result["generated_count"] == 1
@@ -368,6 +370,38 @@ def test_ai_preparation_options_require_reader_role(monkeypatch):
 
     assert error.value.status_code == 403
     assert query_calls == []
+
+
+def test_ai_preparation_quota_is_reported_per_user(monkeypatch):
+    hourly = main.SlidingWindowLimiter(limit=5, window_seconds=3600)
+    daily = main.SlidingWindowLimiter(limit=20, window_seconds=86400)
+    monkeypatch.setattr(main, "AI_HOURLY_LIMITER", hourly)
+    monkeypatch.setattr(main, "AI_DAILY_LIMITER", daily)
+    hourly.check("reader-1")
+    daily.check("reader-1")
+
+    quota = main.ai_preparation_quota(user={"role": "user", "id": "reader-1"})
+    other_user_quota = main.ai_preparation_quota(user={"role": "user", "id": "reader-2"})
+
+    assert quota["hourly"]["remaining"] == 4
+    assert quota["daily"]["remaining"] == 19
+    assert other_user_quota["hourly"]["remaining"] == 5
+    assert other_user_quota["daily"]["remaining"] == 20
+
+
+def test_daily_ai_limit_does_not_consume_hourly_allowance(monkeypatch):
+    hourly = main.SlidingWindowLimiter(limit=5, window_seconds=3600)
+    daily = main.SlidingWindowLimiter(limit=1, window_seconds=86400)
+    monkeypatch.setattr(main, "AI_HOURLY_LIMITER", hourly)
+    monkeypatch.setattr(main, "AI_DAILY_LIMITER", daily)
+    daily.check("reader-1")
+
+    with pytest.raises(HTTPException) as error:
+        main.consume_ai_generation_quota({"id": "reader-1"})
+
+    assert error.value.status_code == 429
+    assert int(error.value.headers["Retry-After"]) >= 1
+    assert hourly.status("reader-1")["remaining"] == 5
 
 
 def test_digital_pdf_text_is_extracted_with_page_order(tmp_path):

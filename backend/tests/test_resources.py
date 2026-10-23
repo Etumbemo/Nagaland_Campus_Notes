@@ -5,14 +5,14 @@ import asyncio
 import pytest
 from fastapi import HTTPException, UploadFile
 from starlette.datastructures import Headers
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, StreamingResponse
 
 try:
     from app import main
-    from app.schemas import ResourceReviewUpdate
+    from app.schemas import DepartmentCreate, DepartmentUpdate, ResourceReviewUpdate
 except ModuleNotFoundError:
     from backend.app import main
-    from backend.app.schemas import ResourceReviewUpdate
+    from backend.app.schemas import DepartmentCreate, DepartmentUpdate, ResourceReviewUpdate
 
 
 class RecordingDatabase:
@@ -35,9 +35,54 @@ def pdf_upload():
     )
 
 
+def test_reader_can_add_department(monkeypatch):
+    database = RecordingDatabase()
+    writes = []
+    department = {"id": "dept-new", "name": "Biology", "code": "BIO"}
+    monkeypatch.setattr(main, "execute", lambda _db, sql, params=(): writes.append((sql, params)) or 1)
+    monkeypatch.setattr(main, "query_one", lambda *_args: department)
+
+    result = main.create_department(
+        DepartmentCreate(name=" Biology ", code="bio"),
+        db=database,
+        user={
+            "id": "reader-1",
+            "role": "user",
+            "resource_upload_permission_status": "approved",
+        },
+    )
+
+    assert result == department
+    assert writes[0][1][1:] == ("Biology", "BIO")
+    assert database.commits == 1
+
+
+def test_reader_without_upload_permission_cannot_add_department():
+    with pytest.raises(HTTPException) as error:
+        main.create_department(
+            DepartmentCreate(name="Biology", code="BIO"),
+            db=object(),
+            user={"id": "reader-1", "role": "user"},
+        )
+
+    assert error.value.status_code == 403
+
+
+def test_reader_cannot_edit_department():
+    with pytest.raises(HTTPException) as error:
+        main.update_department(
+            "dept-1",
+            DepartmentUpdate(name="Changed"),
+            db=object(),
+            user={"id": "reader-1", "role": "user"},
+        )
+
+    assert error.value.status_code == 403
+
+
 @pytest.mark.parametrize(
     ("role", "expected_status"),
-    [("user", "pending"), ("super_admin", "approved")],
+    [("user", "approved"), ("super_admin", "approved")],
 )
 def test_readers_submit_for_review_and_admin_uploads_publish_immediately(
     role, expected_status, tmp_path, monkeypatch
@@ -75,8 +120,7 @@ def test_readers_submit_for_review_and_admin_uploads_publish_immediately(
             academic_year="2026-27",
             description="Class notes",
             db=database,
-            user={"id": "uploader-1", "name": "Uploader", "role": role},
-        )
+            user={"id": "uploader-1", "name": "Uploader", "role": role, "resource_upload_permission_status": "approved"},        )
     )
 
     assert result["status"] == expected_status
@@ -141,7 +185,7 @@ def test_resource_file_is_removed_when_database_insert_fails(tmp_path, monkeypat
                 academic_year=None,
                 description=None,
                 db=database,
-                user={"id": "reader-1", "name": "Reader", "role": "user"},
+                user={"id": "reader-1", "name": "Reader", "role": "user", "resource_upload_permission_status": "approved"},
             )
         )
 
@@ -195,3 +239,72 @@ def test_pending_resource_file_is_visible_only_to_uploader_or_admin(tmp_path, mo
     )
     assert isinstance(response, FileResponse)
     assert Path(response.path) == tmp_path / "private.pdf"
+
+
+def test_s3_resource_download_streams_only_after_access_check(monkeypatch):
+    class StreamBody:
+        closed = False
+
+        def iter_chunks(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield b"%PDF-private"
+
+        def close(self):
+            self.closed = True
+
+    body = StreamBody()
+    resource = {
+        "id": "resource-1",
+        "file_path": "s3:private.pdf",
+        "original_file_name": "private notes.pdf",
+        "uploaded_by": "reader-1",
+        "status": "approved",
+    }
+    monkeypatch.setattr(main, "query_one", lambda *_args: resource)
+    monkeypatch.setattr(
+        main,
+        "get_resource_object",
+        lambda _stored_path: {"Body": body, "ContentLength": 12},
+    )
+
+    response = main.get_resource_file(
+        "resource-1",
+        db=object(),
+        user={"id": "reader-1", "role": "user"},
+    )
+    assert isinstance(response, StreamingResponse)
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "private%20notes.pdf" in response.headers["content-disposition"]
+
+    async def read_response():
+        return b"".join([chunk async for chunk in response.body_iterator])
+
+    assert asyncio.run(read_response()) == b"%PDF-private"
+    assert body.closed
+
+
+def test_unapproved_s3_resource_is_not_fetched_for_another_reader(monkeypatch):
+    resource = {
+        "id": "resource-1",
+        "file_path": "s3:private.pdf",
+        "original_file_name": "private.pdf",
+        "uploaded_by": "reader-1",
+        "status": "pending",
+    }
+    storage_calls = []
+    monkeypatch.setattr(main, "query_one", lambda *_args: resource)
+    monkeypatch.setattr(
+        main,
+        "get_resource_object",
+        lambda *_args: storage_calls.append(True),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        main.get_resource_file(
+            "resource-1",
+            db=object(),
+            user={"id": "reader-2", "role": "user"},
+        )
+
+    assert error.value.status_code == 404
+    assert storage_calls == []

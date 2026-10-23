@@ -32,7 +32,10 @@ TABLE_ORDER = (
     "departments",
     "profiles",
     "password_reset_otps",
+    "email_verification_otps",
+    "login_otps",
     "papers",
+    "resources",
     "favorites",
     "activity_logs",
 )

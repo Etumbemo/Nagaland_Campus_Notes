@@ -9,7 +9,11 @@ import {
   View,
 } from 'react-native';
 import { COLORS } from './src/constants/colors';
-import { generateAiPreparation, getAiPreparationOptions } from './api';
+import {
+  generateAiPreparation,
+  getAiPreparationOptions,
+  getAiPreparationQuota,
+} from './api';
 
 const FEATURES = [
   {
@@ -24,6 +28,33 @@ const FEATURES = [
   },
 ];
 const EMPTY_YEARS = [];
+
+function formatRetryDelay(seconds) {
+  if (!seconds || seconds < 60) return 'less than a minute';
+  const totalMinutes = Math.ceil(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (!hours) return `${totalMinutes} minutes`;
+  return minutes ? `${hours} hours and ${minutes} minutes` : `${hours} hours`;
+}
+
+function generationErrorMessage(error) {
+  if (error.status === 429) {
+    const limitName = /daily/i.test(error.message) ? '24-hour' : 'hourly';
+    const delay = formatRetryDelay(error.retryAfterSeconds);
+    return `Your ${limitName} AI request limit has been reached. Try again in ${delay}.`;
+  }
+  if (error.status === 502) {
+    if (/unavailable|empty response/i.test(error.message)) {
+      return 'Groq is temporarily unavailable or returned an empty response. Wait a moment and try again.';
+    }
+    return `Groq returned a response the app could not use: ${error.message} Check the selected papers and try again.`;
+  }
+  if (!error.status) {
+    return 'Could not reach the server. Check your connection and try again.';
+  }
+  return error.message || 'Generation failed. Please retry.';
+}
 
 function ThemedSelect({ value, options, onChange, disabled, label }) {
   const [visible, setVisible] = useState(false);
@@ -278,13 +309,14 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
   const [loadingGeneration, setLoadingGeneration] = useState(false);
   const [optionsError, setOptionsError] = useState('');
   const [generationError, setGenerationError] = useState('');
+  const [quota, setQuota] = useState(null);
   const [subjects, setSubjects] = useState([]);
   const [feature, setFeature] = useState('');
   const [subjectIndex, setSubjectIndex] = useState('');
   const [startYear, setStartYear] = useState(null);
   const [endYear, setEndYear] = useState(null);
   const [questionCount, setQuestionCount] = useState('10');
-  const [hostedConsent, setHostedConsent] = useState(false);
+  const [hostedConsent, setHostedConsent] = useState(true);
   const [result, setResult] = useState(null);
 
   useEffect(() => {
@@ -294,6 +326,7 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
         if (!active) return;
         const availableSubjects = response.subjects || [];
         setSubjects(availableSubjects);
+        setQuota(response.quota || null);
         if (availableSubjects.length) setSubjectIndex('0');
       })
       .catch((error) => {
@@ -382,8 +415,13 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
       });
       setResult(response);
     } catch (error) {
-      setGenerationError(error.message || 'Generation failed. Please retry.');
+      setGenerationError(generationErrorMessage(error));
     } finally {
+      try {
+        setQuota(await getAiPreparationQuota());
+      } catch {
+        // Keep the last known quota visible if a refresh fails.
+      }
       setLoadingGeneration(false);
     }
   }
@@ -435,6 +473,17 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
       <Text style={styles.bodyText}>
         Questions are generated only from available uploaded question-paper PDFs.
       </Text>
+      {quota ? (
+        <View style={styles.quotaCard}>
+          <Text style={styles.quotaTitle}>AI requests remaining</Text>
+          <Text style={styles.quotaText}>
+            Rolling hour: {quota.hourly.remaining} of {quota.hourly.limit}
+          </Text>
+          <Text style={styles.quotaText}>
+            Rolling 24 hours: {quota.daily.remaining} of {quota.daily.limit}
+          </Text>
+        </View>
+      ) : null}
 
       <Text style={styles.sectionTitle}>1. Choose a feature</Text>
       {FEATURES.map((item) => (
@@ -467,6 +516,7 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
                 .then((response) => {
                   const availableSubjects = response.subjects || [];
                   setSubjects(availableSubjects);
+                  setQuota(response.quota || null);
                   setSubjectIndex(availableSubjects.length ? '0' : '');
                 })
                 .catch((error) => setOptionsError(error.message || 'Could not load available papers.'))
@@ -588,7 +638,7 @@ export default function AIPreparationScreen({ user, onBack, onSignIn }) {
           >
             <Text style={styles.checkbox}>{hostedConsent ? '☑' : '☐'}</Text>
             <Text style={styles.bodyText}>
-              Use Groq for this generation. I consent to sending the selected PDF text to Groq. If Groq is unavailable, local Ollama will be tried. Leave unchecked to use local Ollama only.
+              Groq is selected automatically. I consent to sending the selected PDF text to Groq for this generation. Groq is the only provider used; uncheck to block generation.
             </Text>
           </Pressable>
           <Text style={styles.mutedText}>
@@ -758,6 +808,16 @@ const styles = StyleSheet.create({
   loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 8 },
   errorText: { color: COLORS.red, fontSize: 14, lineHeight: 20 },
   warningText: { color: '#F6CC76', fontSize: 14, lineHeight: 20 },
+  quotaCard: {
+    borderRadius: 12,
+    backgroundColor: COLORS.cardSurface,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    padding: 12,
+    gap: 4,
+  },
+  quotaTitle: { color: COLORS.white, fontWeight: '800', fontSize: 14 },
+  quotaText: { color: COLORS.coolGrey, fontSize: 13, lineHeight: 18 },
   noticeCard: {
     borderRadius: 14,
     backgroundColor: COLORS.cardSurface,

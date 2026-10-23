@@ -56,6 +56,10 @@ export async function request(path, options = {}) {
       : detail || data?.error || 'Request failed';
     const error = new Error(message);
     error.status = response.status;
+    const retryAfterSeconds = Number(response.headers.get('Retry-After'));
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      error.retryAfterSeconds = retryAfterSeconds;
+    }
     throw error;
   }
   return normalizeKeys(data);
@@ -63,6 +67,10 @@ export async function request(path, options = {}) {
 
 export function getAiPreparationOptions() {
   return request('/api/ai-prep/options');
+}
+
+export function getAiPreparationQuota() {
+  return request('/api/ai-prep/quota');
 }
 
 export function generateAiPreparation(payload) {
@@ -76,6 +84,19 @@ export async function signIn(email, password, expectedAccountType) {
   const result = await request('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+  });
+  return result;
+}
+
+export function requestLoginOtp(email, password) {
+  return request('/api/auth/login/otp/resend', {
+    method: 'POST', body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function confirmLoginOtp(email, otp, expectedAccountType) {
+  const result = await request('/api/auth/login/otp/confirm', {
+    method: 'POST', body: JSON.stringify({ email, otp }),
   });
   if (!['user', 'institute'].includes(result.user.role)) {
     throw new Error('Administrator accounts must sign in at the backend admin dashboard.');
@@ -99,6 +120,29 @@ export async function confirmPasswordReset(email, otp, newPassword) {
   return request('/api/auth/password-reset/confirm', {
     method: 'POST',
     body: JSON.stringify({ email, otp, new_password: newPassword }),
+  });
+}
+
+export function requestEmailVerification(email) {
+  return request('/api/auth/email-verification/request', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function confirmEmailVerification(email, otp) {
+  const result = await request('/api/auth/email-verification/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ email, otp }),
+  });
+  await SecureStore.setItemAsync(TOKEN_KEY, result.session.accessToken);
+  return result.user;
+}
+
+export async function downloadPaperFile(fileUrl, destination) {
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  return FileSystem.downloadAsync(fileUrl, destination, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
 }
 
@@ -158,8 +202,7 @@ export async function register(
       }),
     });
   }
-  await SecureStore.setItemAsync(TOKEN_KEY, result.session.accessToken);
-  return result.user;
+  return normalizeKeys(result);
 }
 
 export async function signOut() {
@@ -238,22 +281,28 @@ export async function uploadStudyResource(file, metadata) {
   })) {
     if (value) parameters[key] = String(value);
   }
-  const response = await new File(file.uri).upload(`${API_URL}/api/resources`, {
-    httpMethod: 'POST',
-    uploadType: UploadType.MULTIPART,
-    fieldName: 'file',
-    mimeType: file.mimeType || 'application/pdf',
+  const body = new FormData();
+  body.append('file', {
+    uri: file.uri,
+    name: file.name || 'study-resource.pdf',
+    type: file.mimeType || 'application/pdf',
+  });
+  for (const [key, value] of Object.entries(parameters)) {
+    body.append(key, String(value));
+  }
+  const response = await fetch(`${API_URL}/api/resources`, {
+    method: 'POST',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
-    parameters,
+    body,
   });
 
   let data;
   try {
-    data = JSON.parse(response.body);
+    data = await response.json();
   } catch {
     data = null;
   }
-  if (response.status < 200 || response.status >= 300) {
+  if (!response.ok) {
     const detail = data?.detail;
     const message = Array.isArray(detail)
       ? detail.map((item) => item.msg).join(', ')

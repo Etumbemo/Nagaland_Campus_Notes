@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     password_hash VARCHAR(255) NOT NULL,
     role VARCHAR(32) NOT NULL DEFAULT 'user',
     token_version INT UNSIGNED NOT NULL DEFAULT 0,
+    email_verified TINYINT(1) NOT NULL DEFAULT 1,
     approval_status VARCHAR(20) NOT NULL DEFAULT 'approved',
+    resource_upload_permission_status VARCHAR(20) NOT NULL DEFAULT 'not_requested',
     institute_name VARCHAR(200) NULL,
     phone VARCHAR(32) NULL,
     designation VARCHAR(120) NULL,
@@ -43,6 +45,30 @@ CREATE TABLE IF NOT EXISTS password_reset_otps (
     attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
     used_at DATETIME NULL,
     CONSTRAINT fk_password_reset_user FOREIGN KEY (user_id)
+        REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS email_verification_otps (
+    email VARCHAR(254) PRIMARY KEY,
+    user_id CHAR(36) NULL,
+    code_hash CHAR(64) NULL,
+    expires_at DATETIME NULL,
+    resend_after DATETIME NOT NULL,
+    attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    used_at DATETIME NULL,
+    CONSTRAINT fk_email_verification_user FOREIGN KEY (user_id)
+        REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS login_otps (
+    email VARCHAR(254) PRIMARY KEY,
+    user_id CHAR(36) NULL,
+    code_hash CHAR(64) NULL,
+    expires_at DATETIME NULL,
+    resend_after DATETIME NOT NULL,
+    attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    used_at DATETIME NULL,
+    CONSTRAINT fk_login_otp_user FOREIGN KEY (user_id)
         REFERENCES profiles(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

@@ -3,6 +3,63 @@ import smtplib
 from email.message import EmailMessage
 
 
+def send_email_verification_otp(email: str, name: str, otp: str) -> None:
+    host = os.getenv("SMTP_HOST", "").strip()
+    sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    if not host or not sender:
+        raise RuntimeError("Email verification is not configured. Set SMTP_HOST and SMTP_FROM_EMAIL.")
+
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+    if username and not password:
+        raise RuntimeError("SMTP_PASSWORD is required when SMTP_USERNAME is configured.")
+    use_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true", "yes"}
+    sender_name = os.getenv("SMTP_FROM_NAME", "Campus-notes").strip()
+
+    message = EmailMessage()
+    message["Subject"] = "Verify your Campus-notes email"
+    message["From"] = f"{sender_name} <{sender}>"
+    message["To"] = email
+    message.set_content(
+        f"Hello {name},\n\n"
+        f"Your Campus-notes verification code is: {otp}\n\n"
+        "This code expires in 10 minutes and can only be used once."
+    )
+
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(message)
+
+
+def send_login_otp(email: str, name: str, otp: str) -> None:
+    host = os.getenv("SMTP_HOST", "").strip()
+    sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    if not host or not sender:
+        raise RuntimeError("Login email verification is not configured. Set SMTP_HOST and SMTP_FROM_EMAIL.")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+    if username and not password:
+        raise RuntimeError("SMTP_PASSWORD is required when SMTP_USERNAME is configured.")
+    use_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true", "yes"}
+    sender_name = os.getenv("SMTP_FROM_NAME", "Campus-notes").strip()
+    message = EmailMessage()
+    message["Subject"] = "Your Campus-notes sign-in code"
+    message["From"] = f"{sender_name} <{sender}>"
+    message["To"] = email
+    message.set_content(f"Hello {name},\n\nYour sign-in code is: {otp}\n\nIt expires in 10 minutes and can only be used once.")
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(message)
+
+
 def send_password_reset_otp(email: str, name: str, otp: str) -> None:
     host = os.getenv("SMTP_HOST", "").strip()
     sender = os.getenv("SMTP_FROM_EMAIL", "").strip()

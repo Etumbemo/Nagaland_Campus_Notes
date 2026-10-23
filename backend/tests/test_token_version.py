@@ -134,13 +134,84 @@ def test_password_reset_invalidates_old_tokens_and_allows_new_login(
     assert account["token_version"] == 1
     assert_token_rejected(old_token)
 
+    monkeypatch.setattr(main, "issue_login_code", lambda _db, _email, _account: 60)
+
     login_result = main.login(
         LoginRequest(email="reader@example.com", password="NewPassword!2"),
         db=db,
     )
-    fresh_token = login_result["session"]["access_token"]
+    assert login_result["otp_required"] is True
+    assert "session" not in login_result
+
+    def query_login_otp(_db: Any, sql: str, _params: tuple = ()) -> dict[str, Any]:
+        if "FROM login_otps" in sql:
+            return {
+                "user_id": "user-1",
+                "code_hash": main.login_code_hash("reader@example.com", "123456"),
+                "used_at": None,
+                "code_is_active": 1,
+                "attempts": 0,
+            }
+        return account
+
+    monkeypatch.setattr(main, "query_one", query_login_otp)
+    verified_result = main.confirm_login_otp(
+        main.LoginOtpConfirm(email="reader@example.com", otp="123456"),
+        db=db,
+    )
+    fresh_token = verified_result["session"]["access_token"]
     assert decode_access_token(fresh_token) == ("user-1", 1)
     assert_token_authenticates(account, fresh_token)
+
+
+def test_super_admin_login_skips_email_otp(monkeypatch: pytest.MonkeyPatch):
+    admin = {
+        "id": "admin-1",
+        "email": "admin@example.com",
+        "name": "Administrator",
+        "role": "super_admin",
+        "password_hash": "stored-hash",
+        "email_verified": 1,
+        "token_version": 2,
+    }
+    db = FakeDatabase()
+    activity = []
+    monkeypatch.setattr(main, "query_one", lambda *_args: admin)
+    monkeypatch.setattr(main, "verify_password", lambda _password, _hash: True)
+    monkeypatch.setattr(main, "execute", lambda _db, sql, params=(): activity.append((sql, params)) or 1)
+    monkeypatch.setattr(
+        main,
+        "issue_login_code",
+        lambda *_args: pytest.fail("Super-admin login must not request an OTP"),
+    )
+
+    result = main.admin_login(
+        LoginRequest(email="admin@example.com", password="Password!1"),
+        db=db,
+    )
+
+    assert result["user"]["role"] == "super_admin"
+    assert decode_access_token(result["session"]["access_token"]) == ("admin-1", 2)
+    assert len(activity) == 1
+
+
+def test_admin_login_rejects_non_admin(monkeypatch: pytest.MonkeyPatch):
+    reader = {
+        "id": "reader-1",
+        "email": "reader@example.com",
+        "password_hash": "stored-hash",
+        "role": "user",
+    }
+    monkeypatch.setattr(main, "query_one", lambda *_args: reader)
+    monkeypatch.setattr(main, "verify_password", lambda _password, _hash: True)
+
+    with pytest.raises(HTTPException) as error:
+        main.admin_login(
+            LoginRequest(email="reader@example.com", password="Password!1"),
+            db=FakeDatabase(),
+        )
+
+    assert error.value.status_code == 403
 
 
 def test_put_password_change_invalidates_old_token(account_store):

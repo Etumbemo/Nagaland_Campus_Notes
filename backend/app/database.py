@@ -87,11 +87,23 @@ def create_tables() -> None:
                     "ALTER TABLE profiles ADD COLUMN approval_status "
                     "VARCHAR(20) NOT NULL DEFAULT 'approved' AFTER role"
                 )
+            cursor.execute("SHOW COLUMNS FROM profiles LIKE 'resource_upload_permission_status'")
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE profiles ADD COLUMN resource_upload_permission_status "
+                    "VARCHAR(20) NOT NULL DEFAULT 'not_requested' AFTER approval_status"
+                )
             cursor.execute("SHOW COLUMNS FROM profiles LIKE 'token_version'")
             if not cursor.fetchone():
                 cursor.execute(
                     "ALTER TABLE profiles ADD COLUMN token_version "
                     "INT UNSIGNED NOT NULL DEFAULT 0 AFTER role"
+                )
+            cursor.execute("SHOW COLUMNS FROM profiles LIKE 'email_verified'")
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE profiles ADD COLUMN email_verified "
+                    "TINYINT(1) NOT NULL DEFAULT 1 AFTER token_version"
                 )
             cursor.execute("SHOW COLUMNS FROM profiles LIKE 'institute_name'")
             if not cursor.fetchone():
@@ -119,6 +131,8 @@ def verify_schema(connection) -> None:
     required_tables = {
         "activity_logs",
         "departments",
+        "email_verification_otps",
+        "login_otps",
         "favorites",
         "papers",
         "password_reset_otps",
@@ -147,6 +161,16 @@ def verify_schema(connection) -> None:
             if "token_version" not in profile_columns:
                 raise RuntimeError(
                     "Database schema is missing profiles.token_version. "
+                    "Restart with SCHEMA_AUTO_MIGRATE=true to apply the additive migration."
+                )
+            if "email_verified" not in profile_columns:
+                raise RuntimeError(
+                    "Database schema is missing profiles.email_verified. "
+                    "Restart with SCHEMA_AUTO_MIGRATE=true to apply the additive migration."
+                )
+            if "resource_upload_permission_status" not in profile_columns:
+                raise RuntimeError(
+                    "Database schema is missing profiles.resource_upload_permission_status. "
                     "Restart with SCHEMA_AUTO_MIGRATE=true to apply the additive migration."
                 )
     except pymysql.MySQLError as error:

@@ -248,6 +248,22 @@ def test_sliding_window_reset_clears_state():
     assert limiter.check("user").allowed is True
 
 
+def test_sliding_window_reports_remaining_requests_and_retry_time():
+    limiter = SlidingWindowLimiter(limit=2, window_seconds=60)
+
+    assert limiter.status("user") == {
+        "limit": 2,
+        "remaining": 2,
+        "retry_after_seconds": 0,
+    }
+    limiter.check("user")
+    limiter.check("user")
+
+    assert limiter.status("user")["remaining"] == 0
+    assert limiter.status("user")["retry_after_seconds"] >= 1
+    assert limiter.peek("other-user").allowed is True
+
+
 # --------------------------------------------------------------------------
 # DB-01: deleting a department reports and gates its cascade
 # --------------------------------------------------------------------------

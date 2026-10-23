@@ -51,13 +51,25 @@ class SlidingWindowLimiter:
 
     def peek(self, key: str) -> LimitResult:
         """Report the current state without recording an event."""
+        state = self.status(key)
+        return LimitResult(state["remaining"] > 0, state["retry_after_seconds"])
+
+    def status(self, key: str) -> dict[str, int]:
+        """Return the current allowance and, when exhausted, its retry delay."""
         now = time.monotonic()
         with self._lock:
             events = self._prune(key, now)
-            if len(events) >= self._limit:
-                retry_after = max(1, int(round(events[0] + self._window - now)))
-                return LimitResult(False, retry_after)
-            return LimitResult(True, 0)
+            exhausted = len(events) >= self._limit
+            retry_after = (
+                max(1, int(round(events[0] + self._window - now)))
+                if exhausted
+                else 0
+            )
+            return {
+                "limit": self._limit,
+                "remaining": max(0, self._limit - len(events)),
+                "retry_after_seconds": retry_after,
+            }
 
     def reset(self, key: str) -> None:
         with self._lock:

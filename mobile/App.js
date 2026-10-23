@@ -13,15 +13,16 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import {
-  request, getStoredUser, register, signIn, signOut, uploadPdf,
-  uploadStudyResource, downloadStudyResource,
+  request, getStoredUser, register, signIn, signOut, uploadPdf, requestLoginOtp, confirmLoginOtp,
+  uploadStudyResource, downloadStudyResource, downloadPaperFile,
   requestPasswordReset, confirmPasswordReset,
+  requestEmailVerification, confirmEmailVerification,
 } from './api';
 import AIPreparationScreen from './AIPreparationScreen';
 
@@ -108,6 +109,68 @@ function ActionButton({ title, onPress, disabled, secondary, compact }) {
         {title}
       </Text>
     </Pressable>
+  );
+}
+
+function ThemedSelect({ label, value, options, onChange, disabled }) {
+  const [visible, setVisible] = useState(false);
+  const selected = options.find((option) => option.value === value);
+
+  return (
+    <View style={styles.field}>
+      <Text style={styles.label}>{label}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${label}: ${selected?.label || 'Choose an option'}`}
+        disabled={disabled || options.length === 0}
+        onPress={() => setVisible(true)}
+        style={({ pressed }) => [
+          styles.selectButton,
+          pressed && styles.buttonPressed,
+          (disabled || options.length === 0) && styles.disabledButton,
+        ]}
+      >
+        <Text style={selected ? styles.selectButtonText : styles.selectPlaceholder}>
+          {selected?.label || 'No options available'}
+        </Text>
+        <Text style={styles.selectChevron}>⌄</Text>
+      </Pressable>
+      <Modal
+        visible={visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setVisible(false)}
+      >
+        <Pressable style={styles.selectBackdrop} onPress={() => setVisible(false)}>
+          <Pressable style={styles.selectDialog} onPress={(event) => event.stopPropagation()}>
+            <Text style={styles.dialogTitle}>{label}</Text>
+            <ScrollView style={styles.selectOptions} keyboardShouldPersistTaps="handled">
+              {options.map((option) => {
+                const active = option.value === value;
+                return (
+                  <Pressable
+                    key={option.value}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    onPress={() => {
+                      onChange(option.value);
+                      setVisible(false);
+                    }}
+                    style={[styles.selectOption, active && styles.selectOptionActive]}
+                  >
+                    <Text style={[styles.selectOptionText, active && styles.selectOptionTextActive]}>
+                      {option.label}
+                    </Text>
+                    {active ? <Text style={styles.selectCheck}>✓</Text> : null}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <ActionButton title="Cancel" secondary onPress={() => setVisible(false)} />
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </View>
   );
 }
 
@@ -470,15 +533,15 @@ function BrowseScreen({
     <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
       <Text style={styles.screenTitle}>Browse papers</Text>
       <Field label="Search" value={search} onChangeText={setSearch} placeholder="Subject or subject code" />
-      <Text style={styles.label}>Department</Text>
-      <View style={styles.picker}>
-        <Picker selectedValue={department} onValueChange={setDepartment}>
-          <Picker.Item label="All departments" value="" />
-          {departments.map((item) => (
-            <Picker.Item key={item.id} label={`${item.name} (${item.code})`} value={item.id} />
-          ))}
-        </Picker>
-      </View>
+      <ThemedSelect
+        label="Department"
+        value={department}
+        onChange={setDepartment}
+        options={[
+          { label: 'All departments', value: '' },
+          ...departments.map((item) => ({ label: `${item.name} (${item.code})`, value: item.id })),
+        ]}
+      />
       <View style={[styles.filterRow, compact && styles.filterColumn]}>
         <View style={styles.filterHalf}>
           <Field label="Semester" value={semester} onChangeText={(value) => setSemester(value.replace(/\D/g, '').slice(0, 2))} placeholder="All" keyboardType="number-pad" />
@@ -552,7 +615,7 @@ function DepartmentsScreen({ departments, papers, onBrowse }) {
   );
 }
 
-function LoginPanel({ onLogin, onRegister, loading }) {
+function LoginPanel({ onLogin, onRegister, onVerifyEmail, onVerifyLogin, loading }) {
   const [mode, setMode] = useState('choose');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -568,6 +631,7 @@ function LoginPanel({ onLogin, onRegister, loading }) {
   const [designation, setDesignation] = useState('');
   const [supportingDocument, setSupportingDocument] = useState(null);
   const [otp, setOtp] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newPasswordVisible, setNewPasswordVisible] = useState(false);
   const [resendSeconds, setResendSeconds] = useState(0);
@@ -575,6 +639,8 @@ function LoginPanel({ onLogin, onRegister, loading }) {
   const isRegistering = mode === 'register';
   const isRequestingReset = mode === 'forgot';
   const isConfirmingReset = mode === 'reset';
+  const isVerifyingEmail = mode === 'verify_email';
+  const isVerifyingLogin = mode === 'verify_login';
   const isChoosingAccountType = mode === 'choose';
   const accountTypeLabel = accountType === 'institute' ? 'Institute staff' : 'Reader';
 
@@ -647,6 +713,51 @@ function LoginPanel({ onLogin, onRegister, loading }) {
     }
   }
 
+  async function submitRegistration() {
+    try {
+      const result = await onRegister(
+        name.trim(), email.trim(), password, accountType, instituteName.trim(), {
+          phone: phone.trim(),
+          designation: designation.trim(),
+          supportingDocument,
+        },
+      );
+      setVerificationCode('');
+      setResendSeconds(result.resendAfterSeconds || 60);
+      setMode('verify_email');
+      showThemedAlert('Check your email', result.message);
+    } catch (error) {
+      showThemedAlert('Could not create account', error.message);
+    }
+  }
+
+  async function resendVerificationCode() {
+    setResetBusy(true);
+    try {
+      const result = await requestEmailVerification(email.trim());
+      setResendSeconds(result.resendAfterSeconds || 60);
+      showThemedAlert('Check your email', result.message);
+    } catch (error) {
+      showThemedAlert('Could not send verification code', error.message);
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
+  async function verifyEmail() {
+    setResetBusy(true);
+    try {
+      await onVerifyEmail(email.trim(), verificationCode);
+      setMode('choose');
+      setVerificationCode('');
+      setPassword('');
+    } catch (error) {
+      showThemedAlert('Could not verify email', error.message);
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
   async function submitLogin() {
     const normalizedEmail = email.trim();
     const emailError = !normalizedEmail
@@ -660,15 +771,48 @@ function LoginPanel({ onLogin, onRegister, loading }) {
     if (emailError || passwordError) return;
 
     try {
-      await onLogin(normalizedEmail, password, accountType);
+      const result = await onLogin(normalizedEmail, password, accountType);
+      if (result?.otpRequired) {
+        setVerificationCode('');
+        setResendSeconds(result.resendAfterSeconds || 60);
+        setMode('verify_login');
+        showThemedAlert('Check your email', result.message);
+      }
     } catch (error) {
       if (error.message.startsWith('This email is registered as ')) {
         setLoginEmailError(error.message);
+      } else if (error.message.startsWith('Verify your email')) {
+        setResendSeconds(0);
+        setMode('verify_email');
       } else if (error.message === 'Invalid email or password') {
         setLoginPasswordError('Email or password is incorrect.');
       } else {
         setLoginPasswordError(error.message);
       }
+    }
+  }
+
+  async function verifyLogin() {
+    setResetBusy(true);
+    try {
+      await onVerifyLogin(email.trim(), verificationCode, accountType);
+    } catch (error) {
+      showThemedAlert('Could not sign in', error.message);
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
+  async function resendLoginCode() {
+    setResetBusy(true);
+    try {
+      const result = await requestLoginOtp(email.trim(), password);
+      setResendSeconds(result.resendAfterSeconds || 60);
+      showThemedAlert('Check your email', result.message);
+    } catch (error) {
+      showThemedAlert('Could not send sign-in code', error.message);
+    } finally {
+      setResetBusy(false);
     }
   }
 
@@ -687,7 +831,9 @@ function LoginPanel({ onLogin, onRegister, loading }) {
       {!isChoosingAccountType ? (
         <>
       <Text style={styles.cardTitle}>
-        {isRegistering
+        {isVerifyingEmail || isVerifyingLogin
+          ? 'Verify your email'
+          : isRegistering
           ? `Create ${accountTypeLabel.toLowerCase()} account`
           : isRequestingReset
             ? 'Forgot password'
@@ -696,24 +842,66 @@ function LoginPanel({ onLogin, onRegister, loading }) {
               : `${accountTypeLabel} sign in`}
       </Text>
       <Text style={styles.muted}>
-        {isRegistering
+        {isVerifyingEmail || isVerifyingLogin
+          ? `Enter the six-digit code sent to ${email}.`
+          : isRegistering
           ? accountType === 'institute'
             ? 'Create an institute staff account. Uploading and editing become available after an administrator approves your account.'
-            : 'Create a reader account to browse papers, save favorites, and submit study resources for administrator review.'
+            : 'Create a reader account to browse papers, save favorites, and request permission to upload study resources.'
           : isRequestingReset || isConfirmingReset
             ? 'Password reset is available for reader, institute, and administrator accounts.'
             : accountType === 'institute'
               ? 'Sign in to check your institute approval status and manage papers when approved.'
-              : 'Sign in to browse papers, manage favorites, and submit notes or assignments for review.'}
+              : 'Sign in to browse papers, manage favorites, and request permission to upload notes or assignments.'}
       </Text>
-      <Pressable
+      {!isVerifyingEmail && !isVerifyingLogin ? <Pressable
         accessibilityRole="button"
         disabled={loading || resetBusy}
         onPress={() => setMode('choose')}
         style={styles.authSwitch}
       >
         <Text style={styles.link}>Change account type · {accountTypeLabel}</Text>
-      </Pressable>
+      </Pressable> : null}
+      {isVerifyingEmail || isVerifyingLogin ? (
+        <>
+          <Field
+            label="Email"
+            value={email}
+            editable={!isVerifyingLogin}
+            onChangeText={setEmail}
+            placeholder="you@example.com"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            maxLength={254}
+          />
+          <Field
+            label="Email code"
+            value={verificationCode}
+            onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="6-digit code"
+            keyboardType="number-pad"
+          />
+          <ActionButton
+            title={resetBusy ? 'Verifying…' : (isVerifyingLogin ? 'Sign in' : 'Verify email')}
+            onPress={isVerifyingLogin ? verifyLogin : verifyEmail}
+            disabled={resetBusy || verificationCode.length !== 6 || !email.trim()}
+          />
+          {isVerifyingLogin ? <ActionButton
+            title={resendSeconds ? `Resend code in ${resendSeconds}s` : (resetBusy ? 'Sending…' : 'Resend code')}
+            onPress={resendLoginCode}
+            disabled={resetBusy || resendSeconds > 0}
+            secondary
+          /> : <ActionButton
+            title={resendSeconds ? `Resend code in ${resendSeconds}s` : (resetBusy ? 'Sending…' : 'Resend code')}
+            onPress={resendVerificationCode}
+            disabled={resetBusy || resendSeconds > 0 || !email.trim()}
+            secondary
+          />}
+          <Pressable disabled={resetBusy} onPress={() => setMode(isVerifyingLogin ? 'login' : 'register')} style={styles.authSwitch}>
+            <Text style={styles.link}>{isVerifyingLogin ? 'Back to sign in' : 'Back to registration'}</Text>
+          </Pressable>
+        </>
+      ) : null}
       {isRequestingReset || isConfirmingReset ? (
         <>
           <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" autoCapitalize="none" />
@@ -755,7 +943,7 @@ function LoginPanel({ onLogin, onRegister, loading }) {
           </Pressable>
         </>
       ) : null}
-      {!isRequestingReset && !isConfirmingReset ? (
+      {!isRequestingReset && !isConfirmingReset && !isVerifyingEmail && !isVerifyingLogin ? (
         <>
           {isRegistering ? (
             <>
@@ -864,13 +1052,7 @@ function LoginPanel({ onLogin, onRegister, loading }) {
           ) : null}
           <ActionButton
             title={loading ? (isRegistering ? 'Creating account…' : 'Signing in…') : (isRegistering ? 'Create account' : 'Sign in')}
-            onPress={() => isRegistering
-              ? onRegister(name.trim(), email.trim(), password, accountType, instituteName.trim(), {
-                phone: phone.trim(),
-                designation: designation.trim(),
-                supportingDocument,
-              })
-              : submitLogin()}
+            onPress={() => isRegistering ? submitRegistration() : submitLogin()}
             disabled={loading || (
               isRegistering && (!email || !password || !isRegistrationTextValid(name) || !isEmailValid(email) || !isPasswordValid(password) || password !== confirmPassword
                 || (accountType === 'institute' && (
@@ -911,6 +1093,8 @@ function InstitutePublishing({ departments, papers, refresh }) {
   const [subject, setSubject] = useState('');
   const [subjectCode, setSubjectCode] = useState('');
   const [departmentId, setDepartmentId] = useState('');
+  const [newDepartmentName, setNewDepartmentName] = useState('');
+  const [newDepartmentCode, setNewDepartmentCode] = useState('');
   const [semester, setSemester] = useState('1');
   const [examType, setExamType] = useState(EXAM_TYPES[0]);
   const [year, setYear] = useState(String(new Date().getFullYear()));
@@ -956,6 +1140,29 @@ function InstitutePublishing({ departments, papers, refresh }) {
     }
   }
 
+  async function addDepartment() {
+    if (!newDepartmentName.trim() || !newDepartmentCode.trim()) {
+      showThemedAlert('Missing information', 'Enter the department name and code.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await request('/api/departments', {
+        method: 'POST',
+        body: JSON.stringify({ name: newDepartmentName.trim(), code: newDepartmentCode.trim() }),
+      });
+      setNewDepartmentName('');
+      setNewDepartmentCode('');
+      setDepartmentId(created.id);
+      refresh();
+      showThemedAlert('Department added', `${created.name} is now available for question papers.`);
+    } catch (error) {
+      showThemedAlert('Could not add department', error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function savePaper() {
     if (!subject.trim() || !departmentId || (!editing && !file)) {
       showThemedAlert('Missing information', 'Enter the paper details, choose a department, and select a PDF.');
@@ -994,19 +1201,27 @@ function InstitutePublishing({ departments, papers, refresh }) {
         <Text style={styles.cardTitle}>{editing ? 'Edit question paper' : 'Upload question paper'}</Text>
         <Field label="Subject" value={subject} onChangeText={setSubject} />
         <Field label="Subject code (optional)" value={subjectCode} onChangeText={setSubjectCode} />
-        <Text style={styles.label}>Department</Text>
-        <View style={styles.picker}>
-          <Picker selectedValue={departmentId} onValueChange={setDepartmentId}>
-            {departments.map((item) => <Picker.Item key={item.id} label={item.name} value={item.id} />)}
-          </Picker>
-        </View>
+        <ThemedSelect
+          label="Department"
+          value={departmentId}
+          onChange={setDepartmentId}
+          options={departments.map((item) => ({ label: item.name, value: item.id }))}
+        />
+        {!editing ? (
+          <>
+            <Text style={styles.sectionTitle}>Add a missing department</Text>
+            <Field label="Department name" value={newDepartmentName} onChangeText={setNewDepartmentName} maxLength={160} />
+            <Field label="Department code" value={newDepartmentCode} onChangeText={setNewDepartmentCode} maxLength={32} autoCapitalize="characters" />
+            <ActionButton title="Add department" secondary onPress={addDepartment} disabled={busy || !newDepartmentName.trim() || !newDepartmentCode.trim()} />
+          </>
+        ) : null}
         <Field label="Semester" value={semester} onChangeText={(value) => setSemester(value.replace(/\D/g, '').slice(0, 2))} keyboardType="number-pad" />
-        <Text style={styles.label}>Exam type</Text>
-        <View style={styles.picker}>
-          <Picker selectedValue={examType} onValueChange={setExamType}>
-            {EXAM_TYPES.map((item) => <Picker.Item key={item} label={item} value={item} />)}
-          </Picker>
-        </View>
+        <ThemedSelect
+          label="Exam type"
+          value={examType}
+          onChange={setExamType}
+          options={EXAM_TYPES.map((item) => ({ label: item, value: item }))}
+        />
         <Field label="Year" value={year} onChangeText={(value) => setYear(value.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" maxLength={4} />
         <Field label="Description (optional)" value={description} onChangeText={setDescription} multiline />
         <ActionButton
@@ -1091,7 +1306,7 @@ function EditProfileForm({ user, onUpdated, onCancel }) {
 }
 
 function AccountScreen({
-  user, loading, onLogin, onRegister, onLogout, onAccountRefreshed,
+  user, loading, onLogin, onRegister, onVerifyEmail, onVerifyLogin, onLogout, onAccountRefreshed,
   departments, papers, resources, refresh,
 }) {
   const [editingProfile, setEditingProfile] = useState(false);
@@ -1108,7 +1323,13 @@ function AccountScreen({
     return (
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.screenTitle}>Your account</Text>
-        <LoginPanel onLogin={onLogin} onRegister={onRegister} loading={loading} />
+        <LoginPanel
+          onLogin={onLogin}
+          onRegister={onRegister}
+          onVerifyEmail={onVerifyEmail}
+          onVerifyLogin={onVerifyLogin}
+          loading={loading}
+        />
       </ScrollView>
     );
   }
@@ -1159,9 +1380,36 @@ function AccountScreen({
         <>
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Your reading account</Text>
-            <Text style={styles.muted}>Browse papers and share notes, assignments, and other study materials. Reader uploads are private until an administrator approves them.</Text>
+            <Text style={styles.muted}>Browse papers and share notes, assignments, and other study materials. Request upload permission once; after approval, future uploads are published automatically.</Text>
+            {user.resourceUploadPermissionStatus === 'approved' ? (
+              <Text style={styles.badge}>Upload permission approved</Text>
+            ) : user.resourceUploadPermissionStatus === 'pending' ? (
+              <>
+                <Text style={styles.badge}>Upload permission pending</Text>
+                <ActionButton title="Refresh permission status" secondary onPress={refreshAccountStatus} />
+              </>
+            ) : (
+              <>
+                {user.resourceUploadPermissionStatus === 'rejected' ? <Text style={styles.muted}>Your upload permission request was declined. You may apply again.</Text> : null}
+                <ActionButton title="Apply for upload permission" onPress={async () => {
+                  try {
+                    await request('/api/resources/upload-permission', { method: 'POST' });
+                    await refreshAccountStatus();
+                    showThemedAlert('Request sent', 'An administrator will review your upload permission request.');
+                  } catch (error) {
+                    showThemedAlert('Could not send request', error.message);
+                  }
+                }} />
+              </>
+            )}
           </View>
-          <StudyResourceForm departments={departments} onSubmitted={refresh} />
+          {user.resourceUploadPermissionStatus === 'approved' ? (
+            <StudyResourceForm
+              departments={departments}
+              onSubmitted={refresh}
+              onDepartmentAdded={refresh}
+            />
+          ) : null}
           <View style={styles.rowBetween}>
             <Text style={styles.sectionTitle}>My resource submissions</Text>
             <ActionButton title="Refresh" compact secondary onPress={refresh} />
@@ -1205,10 +1453,13 @@ function AccountScreen({
   );
 }
 
-function StudyResourceForm({ departments, onSubmitted }) {
+function StudyResourceForm({ departments, onSubmitted, onDepartmentAdded }) {
   const [title, setTitle] = useState('');
   const [resourceType, setResourceType] = useState('notes');
   const [departmentId, setDepartmentId] = useState('');
+  const [addingDepartment, setAddingDepartment] = useState(false);
+  const [newDepartmentName, setNewDepartmentName] = useState('');
+  const [newDepartmentCode, setNewDepartmentCode] = useState('');
   const [subject, setSubject] = useState('');
   const [semester, setSemester] = useState('');
   const [academicYear, setAcademicYear] = useState('');
@@ -1229,6 +1480,33 @@ function StudyResourceForm({ departments, onSubmitted }) {
       if (!result.canceled) setFile(result.assets[0]);
     } catch (error) {
       showThemedAlert('Could not open documents', error.message);
+    }
+  }
+
+  async function addDepartment() {
+    if (!newDepartmentName.trim() || !newDepartmentCode.trim()) {
+      showThemedAlert('Missing information', 'Enter the department name and code.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await request('/api/departments', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newDepartmentName.trim(),
+          code: newDepartmentCode.trim(),
+        }),
+      });
+      setDepartmentId(created.id);
+      setNewDepartmentName('');
+      setNewDepartmentCode('');
+      setAddingDepartment(false);
+      onDepartmentAdded();
+      showThemedAlert('Department added', `${created.name} is now available for study resources.`);
+    } catch (error) {
+      showThemedAlert('Could not add department', error.message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -1256,7 +1534,7 @@ function StudyResourceForm({ departments, onSubmitted }) {
       setFile(null);
       onSubmitted();
       showThemedAlert(
-        'Submitted for review',
+        resource.status === 'approved' ? 'Resource published' : 'Submitted for review',
         resource.status === 'approved'
           ? 'Your resource is published and available in the library.'
           : 'An administrator must approve your resource before readers can access it.',
@@ -1272,27 +1550,48 @@ function StudyResourceForm({ departments, onSubmitted }) {
     <View style={styles.card}>
       <Text style={styles.cardTitle}>Share a study resource</Text>
       <Field label="Title" value={title} onChangeText={setTitle} maxLength={200} />
-      <Text style={styles.label}>Resource type</Text>
-      <View style={styles.picker}>
-          <Picker selectedValue={resourceType} onValueChange={setResourceType}>
-          <Picker.Item label="Notes" value="notes" />
-          <Picker.Item label="Assignments" value="assignments" />
-          <Picker.Item label="Other study material" value="other" />
-        </Picker>
-      </View>
-      <Text style={styles.label}>Department</Text>
-      <View style={styles.picker}>
-          <Picker selectedValue={departmentId} onValueChange={setDepartmentId}>
-          {departments.map((item) => <Picker.Item key={item.id} label={item.name} value={item.id} />)}
-        </Picker>
-      </View>
+      <ThemedSelect
+        label="Resource type"
+        value={resourceType}
+        onChange={setResourceType}
+        options={[
+          { label: 'Notes', value: 'notes' },
+          { label: 'Assignments', value: 'assignments' },
+          { label: 'Other study material', value: 'other' },
+        ]}
+      />
+      <ThemedSelect
+        label="Department"
+        value={departmentId}
+        onChange={setDepartmentId}
+        options={departments.map((item) => ({ label: `${item.name} (${item.code})`, value: item.id }))}
+      />
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => setAddingDepartment((visible) => !visible)}
+        style={styles.addDepartmentToggle}
+      >
+        <Text style={styles.link}>{addingDepartment ? 'Cancel adding department' : 'Can’t find your department? Add it'}</Text>
+      </Pressable>
+      {addingDepartment ? (
+        <View style={styles.departmentForm}>
+          <Field label="Department name" value={newDepartmentName} onChangeText={setNewDepartmentName} maxLength={160} />
+          <Field label="Department code" value={newDepartmentCode} onChangeText={setNewDepartmentCode} maxLength={32} autoCapitalize="characters" />
+          <ActionButton
+            title={busy ? 'Adding…' : 'Add department'}
+            secondary
+            onPress={addDepartment}
+            disabled={busy || !newDepartmentName.trim() || !newDepartmentCode.trim()}
+          />
+        </View>
+      ) : null}
       <Field label="Subject (optional)" value={subject} onChangeText={setSubject} maxLength={200} />
       <Field label="Semester (optional)" value={semester} onChangeText={(value) => setSemester(value.replace(/\D/g, '').slice(0, 2))} keyboardType="number-pad" />
       <Field label="Academic year (optional)" value={academicYear} onChangeText={setAcademicYear} placeholder="2026 or 2026-27" maxLength={8} />
       <Field label="Description (optional)" value={description} onChangeText={setDescription} multiline maxLength={2000} />
-      <Text style={styles.muted}>PDF files only, up to the platform upload limit. Reader submissions stay private until approved.</Text>
+      <Text style={styles.muted}>PDF files only, up to the platform upload limit. Uploads are available after administrator permission is granted.</Text>
       <ActionButton title={file?.name || 'Choose PDF'} secondary onPress={choosePdf} />
-      <ActionButton title={busy ? 'Submitting…' : 'Submit for review'} onPress={submit} disabled={busy || !title.trim() || !departmentId || !file} />
+      <ActionButton title={busy ? 'Uploading…' : 'Upload resource'} onPress={submit} disabled={busy || !title.trim() || !departmentId || !file} />
     </View>
   );
 }
@@ -1305,10 +1604,11 @@ function ResourcesScreen({ user, resources, onSignIn, onView, onDownload, onShar
       <Text style={styles.muted}>Browse notes, assignments, and other study materials approved by administrators.</Text>
       {!user ? (
         <View style={styles.card}>
-          <Text style={styles.muted}>Sign in to browse and download approved study resources.</Text>
+          <Text style={styles.muted}>Browse approved resources below. Sign in to open or download files.</Text>
           <ActionButton title="Sign in" onPress={onSignIn} />
         </View>
-      ) : approvedResources.map((resource) => (
+      ) : null}
+      {approvedResources.map((resource) => (
         <View key={resource.id} style={styles.card}>
           <Text style={styles.cardTitle}>{resource.title}</Text>
           <Text style={styles.muted}>
@@ -1325,7 +1625,7 @@ function ResourcesScreen({ user, resources, onSignIn, onView, onDownload, onShar
           </View>
         </View>
       ))}
-      {user && !approvedResources.length ? <EmptyState text="No approved study resources are available yet." /> : null}
+      {!approvedResources.length ? <EmptyState text="No approved study resources are available yet." /> : null}
     </ScrollView>
   );
 }
@@ -1340,7 +1640,7 @@ async function openPaper(paper, refresh) {
       showThemedAlert('PDF unavailable', 'This paper does not have a PDF attached.');
       return;
     }
-    await Linking.openURL(paper.fileUrl);
+    await openCachedPdf(await cachePdf(paper.fileUrl, `${paper.subject}-${paper.year}`));
     // The view counter is analytics: it must never decide whether a student can
     // read a paper, so it runs after the PDF opens and never blocks the flow.
     request(`/api/papers/${paper.id}/views`, { method: 'POST' })
@@ -1349,6 +1649,19 @@ async function openPaper(paper, refresh) {
   } catch (error) {
     showThemedAlert('Could not open paper', error.message);
   }
+}
+
+async function openCachedPdf(uri) {
+  if (Platform.OS === 'android') {
+    const contentUri = await FileSystem.getContentUriAsync(uri);
+    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+      data: contentUri,
+      type: 'application/pdf',
+      flags: 1,
+    });
+    return;
+  }
+  await Linking.openURL(uri);
 }
 
 function safePdfBaseName(value) {
@@ -1363,7 +1676,7 @@ async function cachePdf(fileUrl, fileName, resource) {
   const localUri = `${FileSystem.cacheDirectory}${safePdfBaseName(fileName)}-${Date.now()}.pdf`;
   const result = resource
     ? await downloadStudyResource(resource, localUri)
-    : await FileSystem.downloadAsync(fileUrl, localUri);
+    : await downloadPaperFile(fileUrl, localUri);
   if (result.status < 200 || result.status >= 300) {
     throw new Error(`The server returned status ${result.status}.`);
   }
@@ -1404,9 +1717,7 @@ async function savePdfToDevice(fileUrl, fileName, resource) {
 
 async function viewResource(resource) {
   try {
-    const uri = await cachePdf(resource.fileUrl, resource.title, resource);
-    const viewUri = Platform.OS === 'android' ? await FileSystem.getContentUriAsync(uri) : uri;
-    await Linking.openURL(viewUri);
+    await openCachedPdf(await cachePdf(resource.fileUrl, resource.title, resource));
   } catch (error) {
     showThemedAlert('Could not open PDF', error.message);
   }
@@ -1509,10 +1820,6 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    if (!user) {
-      setResources([]);
-      return () => { active = false; };
-    }
     request('/api/resources')
       .then((items) => { if (active) setResources(items); })
       .catch((error) => {
@@ -1536,11 +1843,9 @@ export default function App() {
   async function handleLogin(email, password, expectedAccountType) {
     setLoading(true);
     try {
-      const loggedInUser = await signIn(email, password, expectedAccountType);
-      setUser(loggedInUser);
+      const result = await signIn(email, password, expectedAccountType);
       setNotice('');
-      setTab('Account');
-      refresh();
+      return result;
     } catch (error) {
       setNotice('');
       throw error;
@@ -1549,10 +1854,23 @@ export default function App() {
     }
   }
 
+  async function handleLoginOtp(email, otp, expectedAccountType) {
+    setLoading(true);
+    try {
+      const loggedInUser = await confirmLoginOtp(email, otp, expectedAccountType);
+      setUser(loggedInUser);
+      setNotice('');
+      setTab('Account');
+      refresh();
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleRegister(name, email, password, accountType, instituteName, instituteDetails) {
     setLoading(true);
     try {
-      const registeredUser = await register(
+      return await register(
         name,
         email,
         password,
@@ -1560,17 +1878,34 @@ export default function App() {
         instituteName,
         instituteDetails,
       );
-      setUser(registeredUser);
-      setNotice(accountType === 'institute'
-        ? 'Your institute account request has been sent to the admin for approval. If approved, you will receive an email confirmation.'
-        : '');
-      setTab('Account');
-      refresh();
     } catch (error) {
-      setNotice(error.message);
+      setNotice('');
+      throw error;
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleEmailVerification(email, otp) {
+    const verifiedUser = await confirmEmailVerification(email, otp);
+    setUser(verifiedUser);
+    setNotice(verifiedUser.role === 'institute' && verifiedUser.approvalStatus !== 'approved'
+      ? 'Your email is verified. Institute features remain locked until an administrator approves your account.'
+      : '');
+    setTab('Account');
+    refresh();
+  }
+
+  function runProtectedFeature(feature, callback) {
+    if (user) return callback();
+    showDialog(
+      'Sign in to continue',
+      `Create an account or sign in to ${feature}.`,
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Sign up or sign in', onPress: () => setTab('Account') },
+      ],
+    );
   }
 
   function handleLogout() {
@@ -1602,8 +1937,7 @@ export default function App() {
 
   async function toggleFavorite(paperId) {
     if (!user) {
-      setNotice('Sign in to save favorite papers.');
-      setTab('Account');
+      runProtectedFeature('save favorite papers', () => {});
       return;
     }
     try {
@@ -1623,9 +1957,9 @@ export default function App() {
         user={user}
         resources={resources}
         onSignIn={() => setTab('Account')}
-        onView={viewResource}
-        onDownload={downloadResource}
-        onShare={(resource) => sharePdf(resource.fileUrl, resource.title, resource)}
+        onView={(resource) => runProtectedFeature('open study resources', () => viewResource(resource))}
+        onDownload={(resource) => runProtectedFeature('download study resources', () => downloadResource(resource))}
+        onShare={(resource) => runProtectedFeature('share study resources', () => sharePdf(resource.fileUrl, resource.title, resource))}
       />
     );
   } else if (tab === 'AI Preparation') {
@@ -1648,10 +1982,10 @@ export default function App() {
           if (deptId) setBrowseDepartment(deptId);
           setTab('Browse');
         }}
-        onOpenPaper={(paper) => openPaper(paper, refresh)}
-        onDownloadPaper={(paper) => downloadPaper(paper, refresh)}
-        onSharePaper={(paper) => sharePdf(paper.fileUrl, `${paper.subject}-${paper.year}`)}
-        onAIPreparation={() => setTab('AI Preparation')}
+        onOpenPaper={(paper) => runProtectedFeature('open question papers', () => openPaper(paper, refresh))}
+        onDownloadPaper={(paper) => runProtectedFeature('download question papers', () => downloadPaper(paper, refresh))}
+        onSharePaper={(paper) => runProtectedFeature('share question papers', () => sharePdf(paper.fileUrl, `${paper.subject}-${paper.year}`))}
+        onAIPreparation={() => runProtectedFeature('use AI exam preparation', () => setTab('AI Preparation'))}
         compact={compact}
       />
     );
@@ -1664,9 +1998,9 @@ export default function App() {
         favorites={favorites}
         initialDepartment={browseDepartment}
         onFavorite={toggleFavorite}
-        onOpenPaper={(paper) => openPaper(paper, refresh)}
-        onDownloadPaper={(paper) => downloadPaper(paper, refresh)}
-        onSharePaper={(paper) => sharePdf(paper.fileUrl, `${paper.subject}-${paper.year}`)}
+        onOpenPaper={(paper) => runProtectedFeature('open question papers', () => openPaper(paper, refresh))}
+        onDownloadPaper={(paper) => runProtectedFeature('download question papers', () => downloadPaper(paper, refresh))}
+        onSharePaper={(paper) => runProtectedFeature('share question papers', () => sharePdf(paper.fileUrl, `${paper.subject}-${paper.year}`))}
         refresh={refresh}
         clearNotice={() => setNotice('')}
         compact={compact}
@@ -1690,6 +2024,8 @@ export default function App() {
         loading={loading}
         onLogin={handleLogin}
         onRegister={handleRegister}
+        onVerifyEmail={handleEmailVerification}
+        onVerifyLogin={handleLoginOtp}
         onLogout={handleLogout}
         onAccountRefreshed={setUser}
         departments={departments}
@@ -2041,6 +2377,66 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: COLORS.glassInput,
     overflow: 'hidden',
+  },
+  selectButton: {
+    width: '100%',
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    borderRadius: 12,
+    backgroundColor: COLORS.glassInput,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  selectButtonText: { color: COLORS.white, fontSize: 15, flex: 1 },
+  selectPlaceholder: { color: COLORS.softGrey, fontSize: 15, flex: 1 },
+  selectChevron: { color: COLORS.mintGreen, fontSize: 19, fontWeight: '800', marginLeft: 10 },
+  selectBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(4, 15, 24, 0.72)',
+  },
+  selectDialog: {
+    width: '100%',
+    maxWidth: 440,
+    maxHeight: '80%',
+    padding: 18,
+    gap: 10,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    backgroundColor: COLORS.deepNavy,
+  },
+  selectOptions: { flexShrink: 1 },
+  selectOption: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.glassBorder,
+  },
+  selectOptionActive: {
+    borderRadius: 10,
+    backgroundColor: 'rgba(97, 214, 179, 0.14)',
+  },
+  selectOptionText: { color: COLORS.coolGrey, fontSize: 15, flex: 1 },
+  selectOptionTextActive: { color: COLORS.mintGreen, fontWeight: '700' },
+  selectCheck: { color: COLORS.mintGreen, fontSize: 17, fontWeight: '800', marginLeft: 10 },
+  addDepartmentToggle: { alignSelf: 'flex-start', paddingVertical: 5 },
+  departmentForm: {
+    gap: 8,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    borderRadius: 14,
+    backgroundColor: COLORS.glassBackground,
   },
   button: {
     backgroundColor: COLORS.forestGreen,

@@ -52,7 +52,18 @@ folders are left unchanged.
    stored privately in `backend/resource_uploads` by default;
    `RESOURCE_UPLOAD_DIR` can override that location but must remain outside the
    public `UPLOAD_DIR`. Relative storage paths are resolved against the
-   `backend` folder.
+   `backend` folder. For hosting, resource PDFs can use a private S3-compatible
+   bucket by setting `RESOURCE_STORAGE_BACKEND=s3`,
+   `RESOURCE_STORAGE_BUCKET`, and `RESOURCE_STORAGE_REGION`. Set
+   `RESOURCE_STORAGE_ENDPOINT_URL` for providers with a custom S3 endpoint, and
+   provide both `RESOURCE_STORAGE_ACCESS_KEY_ID` and
+   `RESOURCE_STORAGE_SECRET_ACCESS_KEY` when the host does not provide an IAM
+   role. Keep the bucket private: downloads continue through the authenticated
+   API, which streams the PDF only after checking resource approval and access.
+   The PDF bytes are not stored in MySQL; MySQL stores resource metadata and
+   the private storage key. Never put credentials in source control. Local disk
+   remains the default, and existing local resource files continue to work
+   when S3 is enabled.
    Production database users need only normal application data permissions
    unless schema setup is explicitly enabled. Set `SCHEMA_AUTO_MIGRATE=true`
    only when startup is authorized to create the database and apply additive
@@ -66,14 +77,30 @@ folders are left unchanged.
    Readers can create accounts from the mobile app. Administrator accounts
    are provisioned only through `ADMIN_EMAIL`/`ADMIN_PASSWORD` or by an
    authenticated super admin; public registration never grants admin access.
+Visitors can browse departments and paper listings without an account, but
+paper PDFs and interactive features require a signed-in account. New reader and
+institute accounts must verify their email with a six-digit code before they
+can sign in. Reader and institute sign-ins require a fresh email code before a
+session is created. The admin dashboard uses a separate password-only sign-in
+endpoint for system administrators; the standard sign-in flow still requires
+email codes. Sign-in codes expire after 10 minutes, allow five guesses, and can
+be resent after 60 seconds. Verification codes expire after 10 minutes, allow
+five guesses, and can be resent after 60 seconds. Verification email uses the SMTP settings
+described above. Existing accounts are treated as verified by the additive
+schema migration. For an existing installation, enable
+`SCHEMA_AUTO_MIGRATE=true` for one startup to add the verification column and
+OTP tables, then turn it off again if you prefer to keep migrations manual.
    On startup, legacy department administrator accounts are converted to
    reader accounts, their department assignments are cleared, and their
    existing sessions are revoked.
    Readers can submit PDF notes, assignments, and other study materials from
-   the mobile app. These files remain private until a system administrator
-   approves each submission in the admin dashboard. Administrator uploads are
-   published immediately. Approved resources are served through an authenticated
-   API and stored outside the public question-paper upload directory.
+   the mobile app after a system administrator grants upload permission.
+   Readers with upload permission can add missing departments from the resource
+   form; readers can create departments but cannot edit or delete them. These
+   files remain private until a system administrator approves each submission
+   in the admin dashboard. Administrator uploads are published immediately.
+   Approved resources are served through an authenticated API and stored
+   outside the public question-paper upload directory.
    Institute staff registration collects a phone number, designation,
    college/university name, and a required PDF, JPG, or PNG affiliation document
    (up to `MAX_UPLOAD_MB`). Supporting documents are stored privately and can
@@ -126,8 +153,12 @@ A throttled request returns HTTP 429 with a `Retry-After` header.
 | Endpoint | Limit |
 | --- | --- |
 | `POST /api/auth/login` | 15 attempts / 15 minutes |
+| `POST /api/auth/login/otp/resend` | 5 / hour (plus a 60-second per-email cooldown) |
+| `POST /api/auth/login/otp/confirm` | 10 / hour (plus five guesses per code) |
 | `POST /api/auth/register` | 5 / hour |
 | `POST /api/auth/password-reset/request` | 5 / hour (plus the per-email cooldown) |
+| `POST /api/auth/email-verification/request` | 5 / hour (plus a 60-second per-email cooldown) |
+| `POST /api/auth/email-verification/confirm` | 10 / hour (plus five guesses per code) |
 | `POST /api/ai-prep/generate` | 5 / hour and 20 / day per user |
 
 These counters live in the API process. Running several uvicorn workers
@@ -145,7 +176,7 @@ cd backend
 # 1. Write a portable SQL dump to ..\backup
 python -m scripts.backup_database
 
-# 2. Archive the PDFs and private documents
+# 2. Archive local PDFs and private documents (include resource_uploads when used)
 tar -czf ..\backup\documents_$(Get-Date -Format yyyyMMdd_HHmmss).tar.gz uploads institute_documents resource_uploads
 
 # 3. Prove the dump restores, by replaying it into campus_notes_verify
@@ -156,6 +187,13 @@ python -m scripts.verify_backup
 row counts against the live database table by table. Treat a `MISMATCH` as a
 failed backup. Nothing in these scripts writes to the live database except the
 scratch database they create.
+
+The SQL dump includes resource metadata and storage keys, not PDF bytes. When
+using S3-compatible storage, configure the provider's own private-bucket
+versioning/replication or backup policy and periodically test restoring both
+the SQL dump and the objects. Before removing local `resource_uploads` files
+after switching to S3, migrate existing resource PDFs and update their stored
+references; enabling S3 alone does not migrate old files.
 
 Restore drill (do this before relying on the backup):
 
